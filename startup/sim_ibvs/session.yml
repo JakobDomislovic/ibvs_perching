@@ -36,10 +36,11 @@ windows:
         # makes this controller fly away!
         - waitForRos; waitForSysStatus; rosrun mavros mavparam -n $UAV_NAMESPACE/mavros set GUID_OPTIONS 0;
           roslaunch ibvs_perching ibvs_perching.launch
-        - history -s "waitForRos; waitForSimulation;
-          rosservice call /$UAV_NAMESPACE/mavros/set_mode 0 GUIDED_NOGPS;
-          sleep 2;
-          rosservice call /$UAV_NAMESPACE/mavros/cmd/arming true"
+        # STEP 1 -- takeoff: sets GUIDED_NOGPS, arms, climbs, then HOLDS position
+        - history -s "rosservice call /$UAV_NAMESPACE/ibvs/takeoff"
+        # STEP 2 -- start aligning toward the tag (ibvs/stop returns to hover)
+        - history -s "rosservice call /$UAV_NAMESPACE/ibvs/start"
+        - history -s "rosservice call /$UAV_NAMESPACE/ibvs/stop"
         - history -s "rosservice call /$UAV_NAMESPACE/mavros/cmd/arming false"
         - history -s "./../../bags/bagger.sh"
   - status:

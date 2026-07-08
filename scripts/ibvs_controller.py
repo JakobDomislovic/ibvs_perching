@@ -42,7 +42,7 @@ Control split:
 
 State machine (this is what makes the controller "modal"):
 
-    WAIT_ARM --(armed & GUIDED_NOGPS)--> CLIMB
+    WAIT_ARM --(ibvs/takeoff called; armed & GUIDED_NOGPS confirmed)--> CLIMB
     CLIMB --(climb_settle_time elapsed, servoing NOT started)--> HOVER
     CLIMB --(climb_settle_time elapsed, started & tag seen)--> ALIGN
     CLIMB --(climb_settle_time elapsed, started, NO tag)--> TAG_LOST
@@ -54,9 +54,14 @@ State machine (this is what makes the controller "modal"):
     (ALIGN/ALIGNED) --(no tag for tag_timeout)--> TAG_LOST
     TAG_LOST --(tag seen again)--> ALIGN
 
-Servoing toward the tag does NOT begin on arming: after takeoff the vehicle
-waits in HOVER until the `ibvs/start` service (std_srvs/Trigger) is called
-(set ~auto_start to true to skip the gate). `ibvs/stop` returns to HOVER.
+Two-step mission (both std_srvs/Trigger):
+    1. `ibvs/takeoff` -- switches to GUIDED_NOGPS, arms, climbs
+       climb_settle_time seconds, then HOLDS position (HOVER).
+    2. `ibvs/start`   -- starts servoing toward the tag (ALIGN).
+    `ibvs/stop` aborts servoing back to HOVER at any time. Arming the
+    vehicle manually does NOT make it climb; only ibvs/takeoff does.
+    Set ~auto_start true to skip the ibvs/start gate (takeoff flows
+    straight into ALIGN).
 
 Thrust ("climb rate") per state:
     WAIT_ARM  hover_thrust (neutral; ignored anyway while disarmed)
@@ -67,11 +72,14 @@ Thrust ("climb rate") per state:
     TAG_LOST  hover_thrust (hold altitude, wait for re-detection)
 """
 
+import math
+
 import rospy
 import tf.transformations as tft
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from mavros_msgs.msg import AttitudeTarget, State
+from mavros_msgs.srv import CommandBool, SetMode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
 
@@ -139,6 +147,13 @@ class IbvsController:
         self.max_tilt = rospy.get_param('~max_tilt', 0.15)
         self.kp_att = rospy.get_param('~kp_att', 1.5)
         self.max_body_rate = rospy.get_param('~max_body_rate', 0.35)
+        # Position hold outside ALIGN/ALIGNED. Level attitude alone does NOT
+        # hover in place: attitude trim bias (AHRS_TRIM in the FCU params)
+        # gives a constant lateral push, and velocity braking only limits the
+        # resulting drift to a terminal speed (flight-tested ~0.1 m/s,
+        # forever). Holding the latched position cancels the bias.
+        self.kp_hover = rospy.get_param('~kp_hover', 0.15)
+        self.kv_hover = rospy.get_param('~kv_hover', 0.25)
 
         # PID gains (I and D default to 0 -- pure P until tuned otherwise)
         kp_xy = rospy.get_param('~pid_xy/kp', 0.15)
@@ -163,9 +178,12 @@ class IbvsController:
         self.align_hysteresis = rospy.get_param('~align_hysteresis', 1.5)
         self.tag_timeout = rospy.get_param('~tag_timeout', 1.0)
 
-        # Servoing gate: arming only takes off and hovers; flying to the tag
+        # Servoing gate: takeoff only climbs and hovers; flying to the tag
         # starts when the ibvs/start service is called (or ~auto_start: true).
         self.servo_active = rospy.get_param('~auto_start', False)
+        # Takeoff gate: being armed in GUIDED_NOGPS alone does NOT climb;
+        # the climb happens only after the ibvs/takeoff service is called.
+        self.takeoff_requested = False
 
         self.state = WAIT_ARM
         self.state_entered_at = rospy.Time.now()
@@ -176,20 +194,64 @@ class IbvsController:
         self.last_tag = None
         self.last_tag_time = None
         self.last_odom = None
+        # (x, y) in the local frame that HOVER/TAG_LOST hold on to
+        self.hold_position = None
 
         self.setpoint_pub = rospy.Publisher(
             'mavros/setpoint_raw/attitude', AttitudeTarget, queue_size=1)
         self.state_pub = rospy.Publisher('ibvs/state', String, queue_size=1, latch=True)
+        # latch the initial state too -- transitions alone would leave the
+        # topic silent until the first state change
+        self.state_pub.publish(String(data=self.state))
 
         rospy.Subscriber('mavros/state', State, self.mavros_state_callback, queue_size=1)
         rospy.Subscriber('ibvs/tag_pose', PoseStamped, self.tag_callback, queue_size=1)
         rospy.Subscriber('mavros/local_position/odom', Odometry,
                          self.odom_callback, queue_size=1)
 
+        self.set_mode_srv = rospy.ServiceProxy('mavros/set_mode', SetMode)
+        self.arming_srv = rospy.ServiceProxy('mavros/cmd/arming', CommandBool)
+
+        rospy.Service('ibvs/takeoff', Trigger, self.handle_takeoff)
         rospy.Service('ibvs/start', Trigger, self.handle_start)
         rospy.Service('ibvs/stop', Trigger, self.handle_stop)
 
         rospy.Timer(rospy.Duration(1.0 / self.control_rate), self.control_loop)
+
+    def handle_takeoff(self, _req):
+        """Full takeoff sequence: GUIDED_NOGPS -> arm -> CLIMB -> HOVER."""
+        if self.state != WAIT_ARM:
+            return TriggerResponse(
+                success=False,
+                message="already flying (state %s)" % self.state)
+
+        # Allow climbing as soon as armed+mode are confirmed by mavros/state.
+        self.takeoff_requested = True
+        try:
+            if self.mode != State.MODE_APM_COPTER_GUIDED_NOGPS:
+                mode_res = self.set_mode_srv(
+                    base_mode=0, custom_mode=State.MODE_APM_COPTER_GUIDED_NOGPS)
+                if not mode_res.mode_sent:
+                    self.takeoff_requested = False
+                    return TriggerResponse(success=False,
+                                           message="set_mode GUIDED_NOGPS rejected")
+                rospy.sleep(2.0)
+
+            if not self.armed:
+                arm_res = self.arming_srv(True)
+                if not arm_res.success:
+                    self.takeoff_requested = False
+                    return TriggerResponse(success=False,
+                                           message="arming rejected (result %d)" % arm_res.result)
+        except rospy.ServiceException as exc:
+            self.takeoff_requested = False
+            return TriggerResponse(success=False, message="mavros service error: %s" % exc)
+
+        rospy.loginfo("ibvs_controller: TAKEOFF accepted (ibvs/takeoff)")
+        return TriggerResponse(
+            success=True,
+            message="taking off: climbing %.1fs then holding; call ibvs/start to align"
+                    % self.climb_settle_time)
 
     def handle_start(self, _req):
         self.servo_active = True
@@ -212,6 +274,13 @@ class IbvsController:
     def odom_callback(self, msg):
         self.last_odom = msg
 
+    def latch_hold_position(self):
+        if self.last_odom is not None:
+            p = self.last_odom.pose.pose.position
+            self.hold_position = (p.x, p.y)
+        else:
+            self.hold_position = None
+
     def transition(self, new_state):
         if new_state != self.state:
             rospy.loginfo("ibvs_controller: %s -> %s", self.state, new_state)
@@ -221,6 +290,12 @@ class IbvsController:
                 self.pid_x.reset()
                 self.pid_y.reset()
                 self.pid_z.reset()
+            # Latch the spot that HOVER/TAG_LOST hold: the takeoff point when
+            # CLIMB starts, or wherever the vehicle is when servoing stops /
+            # the tag is lost. CLIMB -> HOVER keeps the takeoff latch.
+            if new_state == CLIMB or new_state == TAG_LOST or \
+                    (new_state == HOVER and self.state != CLIMB):
+                self.latch_hold_position()
             self.state = new_state
             self.state_entered_at = rospy.Time.now()
             if new_state != ALIGN:
@@ -243,9 +318,13 @@ class IbvsController:
         if not ready_to_fly:
             self.transition(WAIT_ARM)
         elif self.state == WAIT_ARM:
-            self.transition(CLIMB)
+            # Armed + GUIDED_NOGPS alone is not enough: climb only when the
+            # ibvs/takeoff service asked for it.
+            if self.takeoff_requested:
+                self.transition(CLIMB)
         elif self.state == CLIMB:
             if self.time_in_state() >= self.climb_settle_time:
+                self.takeoff_requested = False   # consumed; next takeoff needs a new call
                 if not self.servo_active:
                     self.transition(HOVER)
                 else:
@@ -294,8 +373,30 @@ class IbvsController:
         if self.last_odom is None:
             return 0.0, 0.0
 
+        vel = self.last_odom.twist.twist.linear
+        q = self.last_odom.pose.pose.orientation
+        roll, pitch, yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
+
+        # Default (CLIMB/HOVER/TAG_LOST): hold the latched position. Level
+        # attitude alone is NOT a hover -- attitude trim bias pushes the
+        # vehicle sideways and velocity braking only caps the drift, so a
+        # position P-term is needed to actually stand still. Same cascade
+        # signs as the tag law, with the latched point playing the tag.
         desired_pitch = 0.0
         desired_roll = 0.0
+        if self.hold_position is not None and self.state in (CLIMB, HOVER, TAG_LOST):
+            pos = self.last_odom.pose.pose.position
+            ex = self.hold_position[0] - pos.x
+            ey = self.hold_position[1] - pos.y
+            # local ENU error -> body FLU (yaw only)
+            cy = math.cos(yaw)
+            sy = math.sin(yaw)
+            err_bx = cy * ex + sy * ey
+            err_by = -sy * ex + cy * ey
+            desired_pitch = clamp(self.kp_hover * err_bx - self.kv_hover * vel.x,
+                                  -self.max_tilt, self.max_tilt)
+            desired_roll = clamp(-self.kp_hover * err_by + self.kv_hover * vel.y,
+                                 -self.max_tilt, self.max_tilt)
 
         if self.state in (ALIGN, ALIGNED) and self.last_tag is not None:
             # tag position error is already in body FLU
@@ -314,18 +415,11 @@ class IbvsController:
             elif error_norm > self.align_tolerance * self.align_hysteresis:
                 self.transition(ALIGN)
 
-            # Body velocity gives the D-term (odometry twist is body-frame;
-            # stationary tag: d(tag_pos)/dt = -velocity).
-            vel = self.last_odom.twist.twist.linear
-
             # We must fly TOWARD the tag. FLU sign conventions:
             #   +pitch = nose down = +x accel  ->  pitch error = tag_x - target_x
             #   +roll  = right down = -y accel ->  roll error  = target_y - tag_y
             desired_pitch = self.pid_x.update(-err_x, -vel.x, self.dt)
             desired_roll = self.pid_y.update(err_y, vel.y, self.dt)
-
-        q = self.last_odom.pose.pose.orientation
-        roll, pitch, _ = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
 
         roll_rate = clamp(self.kp_att * (desired_roll - roll),
                           -self.max_body_rate, self.max_body_rate)

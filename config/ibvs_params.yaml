@@ -4,7 +4,7 @@
 # talks to ArduPilot directly through mavros/setpoint_raw/attitude, i.e.
 # WITHOUT the uav_ros_stack tracker/controller running.
 
-control_rate: 20.0            # [Hz] rate at which AttitudeTarget is published
+control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
 # ---------------------------------------------------------------------------
 # Z axis -- climb rate through the AttitudeTarget "thrust" field.
@@ -34,6 +34,11 @@ target_y: 0.0                 # desired relative tag y (left) offset [m]
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
 kp_att: 1.5                   # body rate per rad of attitude error [1/s]
 max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s)
+kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]; HOVER and
+                              # TAG_LOST hold the latched spot (takeoff point /
+                              # wherever servoing stopped) -- level attitude
+                              # alone drifts away on attitude trim bias
+kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
 
 # ---------------------------------------------------------------------------
 # PID gains. I and D start at 0 (pure P) -- raise them only when tuning.
@@ -42,7 +47,7 @@ max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/
 # i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.15                    # desired tilt per meter of tag error [rad/m]
+  kp: 0.1                    # desired tilt per meter of tag error [rad/m]
   ki: 0.0                     # [rad per m*s]
   kd: 0.0                     # [rad per m/s]
   i_max: 0.05                 # [rad] max integral contribution

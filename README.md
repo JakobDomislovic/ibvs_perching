@@ -124,24 +124,39 @@ tag at `(-2, 0, 1)` is 2 m *behind* and 1 m *above* the vehicle.
 ## 4. The state machine
 
 ```
-             armed & GUIDED_NOGPS            settle time & tag fresh
-  WAIT_ARM ------------------------> CLIMB ---------------------------> ALIGN
-     ^                                 |                                 |  ^
-     |                                 | settle time, NO tag             |  |
-     |  disarm / mode change           v                                 |  | error > tol*hyst
-     +---------- (from ANY state) TAG_LOST <---- tag stale (timeout) ----+  |
-                                       |                                 v  |
-                                       +------ tag fresh again ------> ALIGNED
-                                                            (|err| < tol for dwell time)
+          ibvs/takeoff called             settle time          ibvs/start called
+          (mode+arm confirmed)            (takeoff done)       & tag fresh
+  WAIT_ARM ----------------> CLIMB ----------------> HOVER ----------------> ALIGN
+     ^                                                 ^                      |  ^
+     |  disarm / mode change (from ANY state)          | ibvs/stop            |  | error >
+     |                                                 | (any flying state)   |  | tol*hyst
+     |                                                 |                      v  |
+     +----------------------------- TAG_LOST <-- tag stale (timeout) --- ALIGNED
+                                       |                                      ^
+                                       +---------- tag fresh again -----------+
+                                              (|err| < tol for dwell time -> ALIGNED)
 ```
 
 | State | Meaning | desired tilt (X-Y) | thrust (climb rate) |
 |---|---|---|---|
-| `WAIT_ARM` | waiting for `armed && mode == GUIDED_NOGPS` | level (0) | `hover_thrust` (neutral; ignored while disarmed) |
+| `WAIT_ARM` | waiting for `ibvs/takeoff` (armed+mode alone does nothing) | level (0) | `hover_thrust` (neutral; ignored while disarmed) |
 | `CLIMB` | open-loop takeoff / climb phase | level (0) | `climb_thrust` (**> 0.5 → the vehicle lifts off**) |
-| `ALIGN` | closed-loop X-Y servoing + Z standoff regulation | cascade on tag error | P-control on tag height |
-| `ALIGNED` | error small & settled — hold | cascade on tag error | P-control on tag height |
+| `HOVER` | takeoff done — holding, waiting for `ibvs/start` | level (0) | `hover_thrust` (hold altitude) |
+| `ALIGN` | closed-loop X-Y servoing + Z standoff regulation | PID on tag error | PID on tag height |
+| `ALIGNED` | error small & settled — hold | PID on tag error | PID on tag height |
 | `TAG_LOST` | no fresh tag detection | level (0) | `hover_thrust` (hold altitude) |
+
+### Services (all `std_srvs/Trigger`)
+
+| Service | Effect |
+|---|---|
+| `ibvs/takeoff` | full takeoff: switches to GUIDED_NOGPS, arms, climbs `climb_settle_time` s, then **holds position** in `HOVER` |
+| `ibvs/start` | begin servoing toward the tag (`HOVER` → `ALIGN`) |
+| `ibvs/stop` | abort servoing, return to `HOVER` (hold in place) |
+
+Arming the FCU yourself (e.g. `mavros/cmd/arming`) no longer triggers a
+climb — only `ibvs/takeoff` does. To restore the old one-shot behavior
+(takeoff flows straight into alignment) set `~auto_start: true`.
 
 The attitude inner loop (desired tilt → body rate, see §5) is active in
 **every** flying state: with `IGNORE_ATTITUDE` set, a zero body-rate command
@@ -245,6 +260,9 @@ Parameters (all private, loaded from
 | `max_tilt` | `0.15` | desired-tilt clamp [rad] (~8.5°) |
 | `kp_att` | `1.5` | body rate per rad of attitude error [1/s] |
 | `max_body_rate` | `0.35` | roll/pitch rate clamp [rad/s] (~20 °/s) |
+| `kp_hover` | `0.15` | position-hold P outside ALIGN [rad/m]; `HOVER`/`TAG_LOST` hold a latched position (the takeoff point, or wherever servoing stopped). Level attitude alone drifts away on attitude trim bias (flight-tested ~0.1 m/s) |
+| `kv_hover` | `0.25` | velocity damping for the position hold [rad per m/s] |
+| `auto_start` | `false` | skip the `ibvs/start` gate: takeoff flows straight into ALIGN |
 | `climb_settle_time` | `3.0` | duration of the `CLIMB` phase [s] |
 | `align_tolerance` | `0.15` | X-Y error norm considered aligned [m] |
 | `align_dwell_time` | `2.0` | time within tolerance before `ALIGNED` [s] |
@@ -300,39 +318,49 @@ with windows:
 | `roscore` | roscore, ArduPilot SITL (`sim_vehicle.launch`), MAVROS |
 | `gazebo` | kopterworx in Gazebo |
 | `visualization` | PlotJuggler / RViz (pre-typed in history, press ↑) |
-| `ibvs` | `ibvs_perching.launch` + arm/disarm commands (history) |
+| `ibvs` | `ibvs_perching.launch` + takeoff / start / stop / disarm commands (history) |
 | `status` | echoes of `mavros/state`, `ibvs/state`, `ibvs/tag_pose`, `setpoint_raw/attitude`, odometry |
 
-Then, in the `ibvs` window's second pane, press ↑ and run the pre-typed
-command:
+The mission is **two explicit steps** — the pre-typed commands are waiting in
+the `ibvs` window's panes (press ↑):
 
 ```bash
-rosservice call /$UAV_NAMESPACE/mavros/set_mode 0 GUIDED_NOGPS; sleep 2; \
-rosservice call /$UAV_NAMESPACE/mavros/cmd/arming true
+# STEP 1: takeoff -- sets GUIDED_NOGPS, arms, climbs ~3 s, then HOLDS in place
+rosservice call /$UAV_NAMESPACE/ibvs/takeoff
+
+# STEP 2 (whenever you're ready): fly to the tag
+rosservice call /$UAV_NAMESPACE/ibvs/start
+
+# optional: abort alignment, hold current position
+rosservice call /$UAV_NAMESPACE/ibvs/stop
 ```
 
 Expected sequence (watch `ibvs/state` in the `status` window):
 
-1. `WAIT_ARM` → `CLIMB` the moment the FCU reports armed + GUIDED_NOGPS.
-2. `CLIMB` (3 s): thrust `0.7` → **vehicle takes off** and climbs.
-3. `ALIGN`: pitches toward the tag (`body_rate.y > 0` for the demo scenario),
-   regulates height to the 1 m standoff.
-4. `ALIGNED`: error < 15 cm for 2 s → rates zeroed, hovering under the tag.
+1. `ibvs/takeoff` → `WAIT_ARM` → `CLIMB` (3 s, thrust `0.6`) → **`HOVER`,
+   holding position**. Nothing else happens until you say so.
+2. `ibvs/start` → `ALIGN`: tilts toward the tag, regulates height to the
+   1 m standoff.
+3. `ALIGNED`: error < 15 cm for 2 s → holding under the tag.
 
 There is intentionally **no** `control_manager` takeoff service call — no
-tracker/controller is running; the `CLIMB` state *is* the takeoff.
+tracker/controller is running; the `CLIMB` state *is* the takeoff. Note that
+arming via `mavros/cmd/arming` alone does **not** climb anymore: the
+`ibvs/takeoff` service is the only way to lift off (it arms for you).
 
-To land/abort: pane 3 has `arming false` pre-typed, or switch the RC/mode as
-usual; the controller falls back to `WAIT_ARM` on any mode change.
+To land/abort: `ibvs/stop` holds in place; `arming false` (pre-typed) kills
+the motors; any RC/mode change drops the controller back to `WAIT_ARM`.
 
 ## 9. Troubleshooting
 
 **"It does not want to take off"**
 
+- Did you call `ibvs/takeoff`? Arming by hand no longer climbs — the takeoff
+  service is the only trigger (it also arms for you).
 - Most likely cause (and the original bug in this package): sending
   `thrust = 0.5` while expecting it to act as motor thrust. In guided modes
   `0.5` means *zero climb rate* → the vehicle stays on the ground. Ensure
-  `climb_thrust > 0.5` (default `0.7`).
+  `climb_thrust > 0.5` (default `0.6`).
 - The FCU must be **armed** and in **GUIDED_NOGPS** *while* setpoints are
   streaming. The controller streams continuously from startup, so ordering is
   not an issue if it is running before you arm.

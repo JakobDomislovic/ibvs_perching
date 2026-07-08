@@ -9,7 +9,7 @@
 
   <!-- Set to false to feed a real AR-tag detector instead of the mock -->
   <arg name="use_mock_tag" default="true"/>
-  <arg name="tag_world_position" default="[-2.0, 0.0, 1.5]"/>
+  <arg name="tag_world_position" default="[-1.0, 0.0, 1.5]"/>
   <arg name="odom_topic" default="mavros/local_position/odom"/>
 
   <group ns="$(arg namespace)">
