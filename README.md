@@ -97,18 +97,17 @@ body-rate control; see `ArduCopter/mode_guided.cpp`.)
 ## 3. Architecture
 
 ```
-                                 +--------------------------+
-   mavros/local_position/odom -->|  mock_ar_tag_publisher   |
-   (real UAV odometry)           |  (fakes a detector from  |
-                                 |   a fixed tag world pos) |
-                                 +-----------+--------------+
-                                             | ibvs/tag_pose (PoseStamped,
-                                             |  tag position in body FLU)
-                                             v
+   camera/color/image_raw ---> +--------------------------+
+   camera/color/camera_info    |     aruco_detector       |   (or mock_ar_tag_publisher
+   (down-facing camera)        |  cv2.aruco pose estimate |    when use_mock_tag:=true)
+                               +-----------+--------------+
+                                           | ibvs/tag_pose (PoseStamped,
+                                           |  tag position in body FLU)
+                                           v
    mavros/state ------------->  +--------------------------+
    (armed? GUIDED_NOGPS?)       |     ibvs_controller      |--> ibvs/state (String, latched)
-                                |  modal state machine +   |
-                                |  P-control on tag error  |--> mavros/setpoint_raw/attitude
+   mavros/local_position/odom ->|  modal state machine +   |
+   (attitude, velocity, height) |  PID cascade on tag error|--> mavros/setpoint_raw/attitude
                                 +--------------------------+    (AttitudeTarget @ control_rate)
                                                                      |
                                                                      v
@@ -119,7 +118,28 @@ Everything runs under the UAV namespace (`$UAV_NAMESPACE`, default `red`), so
 topic names above are relative (`/red/ibvs/tag_pose`, etc).
 
 The tag pose convention is **body FLU**: `x` forward, `y` left, `z` up. So a
-tag at `(-2, 0, 1)` is 2 m *behind* and 1 m *above* the vehicle.
+tag on the floor 2 m below reads `z = -2`.
+
+### The AR-tag simulation setup (`ar_tag` branch)
+
+| Piece | What / where |
+|---|---|
+| Tag model | `models/ar_tag/` — 20×20 cm ArUco marker (`DICT_4X4_50`, id 0) on a 30×30 cm white plate (5 cm quiet zone), spawned flat on the floor at the **world origin** by `ibvs_perching.launch` |
+| Camera | kopterworx down-facing RGB camera, 640×480 @ 30 fps, 80° HFOV, on `camera/color/image_raw` + `camera_info`; detection throttled to 15 Hz |
+| Camera mount | `urdf/kopterworx_downcam.urdf.xacro` — a copy of the stock kopterworx xacro with `down_facing_camera` moved to `xyz="0 0 -0.05"` (the stock mount hangs 0.3 m below / 0.2 m left, which would touch the tag at the target altitude and push it out of frame during descent) |
+| Detector | `scripts/aruco_detector.py` — see below |
+| Mission profile | `ibvs/takeoff` climbs to **2 m** (`takeoff_height`), holds; when `ibvs/state` shows **`TAG_IN_SIGHT`**, `ibvs/start` centers the tag in the camera and descends to the standoff above the tag (`target_z`, negative = tag below) |
+| Spawn point | UAV starts at `(1, 0)`, 1 m from the tag, so the alignment maneuver is visible |
+| Signals | `config/plotjuggler_ibvs.xml` — PlotJuggler layout with the commanded body rates, thrust/climb-rate, tag error and altitude (pre-typed in the `visualization` window) |
+
+**Detection floor:** the full marker must be inside the image for ArUco to
+detect it. With the 80°(H)/61°(V) FOV and the camera 5 cm below the base,
+the 20 cm marker fills the vertical FOV at roughly **0.25 m** altitude, so
+the 0.3–0.5 m standoff stays comfortably detectable. If detection flickers,
+the controller degrades gracefully (`TAG_LOST` = position hold, re-`ALIGN`
+on re-detection). The **descend gate** (`descend_xy_gate`) additionally
+refuses to descend while laterally off-center, which is what keeps the tag
+inside the shrinking FOV on the way down.
 
 ## 4. The state machine
 
@@ -140,11 +160,16 @@ tag at `(-2, 0, 1)` is 2 m *behind* and 1 m *above* the vehicle.
 | State | Meaning | desired tilt (X-Y) | thrust (climb rate) |
 |---|---|---|---|
 | `WAIT_ARM` | waiting for `ibvs/takeoff` (armed+mode alone does nothing) | level (0) | `hover_thrust` (neutral; ignored while disarmed) |
-| `CLIMB` | open-loop takeoff / climb phase | level (0) | `climb_thrust` (**> 0.5 → the vehicle lifts off**) |
-| `HOVER` | takeoff done — holding, waiting for `ibvs/start` | level (0) | `hover_thrust` (hold altitude) |
-| `ALIGN` | closed-loop X-Y servoing + Z standoff regulation | PID on tag error | PID on tag height |
-| `ALIGNED` | error small & settled — hold | PID on tag error | PID on tag height |
-| `TAG_LOST` | no fresh tag detection | level (0) | `hover_thrust` (hold altitude) |
+| `CLIMB` | takeoff: climbing to `takeoff_height` | position hold (takeoff point) | `climb_thrust` (**> 0.5 → the vehicle lifts off**) |
+| `HOVER` | holding, tag NOT visible — `ibvs/start` would go to `TAG_LOST` | position hold | `hover_thrust` (hold altitude) |
+| `TAG_IN_SIGHT` | holding, **detector sees the tag** — call `ibvs/start` now | position hold | `hover_thrust` (hold altitude) |
+| `ALIGN` | closed-loop X-Y servoing + Z standoff regulation | PID on tag error | PID on tag height (+ descend gate) |
+| `ALIGNED` | error small & settled — hold | PID on tag error | PID on tag height (+ descend gate) |
+| `TAG_LOST` | detection lost while servoing | position hold | `hover_thrust` (hold altitude) |
+
+`HOVER` ↔ `TAG_IN_SIGHT` flip automatically with detection; both hold the
+same latched position — the label is the operator's cue that `ibvs/start`
+will engage immediately.
 
 ### Services (all `std_srvs/Trigger`)
 
@@ -248,7 +273,8 @@ Parameters (all private, loaded from
 | `hover_thrust` | `0.5` | zero-climb-rate command |
 | `climb_thrust` | `0.6` | climb command during `CLIMB` (**must be > 0.5 to take off**) |
 | `thrust_min` / `thrust_max` | `0.35` / `0.7` | clamp on the Z command |
-| `target_z` | `1.0` | desired tag height above vehicle (standoff) [m] |
+| `takeoff_height` | `2.0` | `CLIMB` ends when odometry z reaches this [m] |
+| `target_z` | `-0.3` | desired tag height above vehicle (standoff) [m]; **negative = tag below** (floor tag: hover 0.3 m above it) |
 | `target_x` / `target_y` | `0.0` | desired lateral tag offset [m] |
 | `pid_xy/kp` | `0.15` | desired tilt per meter of tag error [rad/m] |
 | `pid_xy/ki` | `0.0` | integral gain (0 = off) |
@@ -257,19 +283,48 @@ Parameters (all private, loaded from
 | `pid_z/kp` | `0.2` | climb-rate delta per meter of tag-height error |
 | `pid_z/ki` / `pid_z/kd` | `0.0` | integral / derivative gains (0 = off) |
 | `pid_z/i_max` | `0.1` | anti-windup clamp on integral contribution |
+| `descend_xy_gate` | `0.25` | landing funnel: descend only while the lateral tag error is inside this radius [m] — descending off-center loses the tag from the shrinking FOV (flight-tested) |
 | `max_tilt` | `0.15` | desired-tilt clamp [rad] (~8.5°) |
 | `kp_att` | `1.5` | body rate per rad of attitude error [1/s] |
 | `max_body_rate` | `0.35` | roll/pitch rate clamp [rad/s] (~20 °/s) |
 | `kp_hover` | `0.15` | position-hold P outside ALIGN [rad/m]; `HOVER`/`TAG_LOST` hold a latched position (the takeoff point, or wherever servoing stopped). Level attitude alone drifts away on attitude trim bias (flight-tested ~0.1 m/s) |
 | `kv_hover` | `0.25` | velocity damping for the position hold [rad per m/s] |
 | `auto_start` | `false` | skip the `ibvs/start` gate: takeoff flows straight into ALIGN |
-| `climb_settle_time` | `3.0` | duration of the `CLIMB` phase [s] |
+| `climb_settle_time` | `10.0` | `CLIMB` fallback timeout if `takeoff_height` is never reached [s] |
 | `align_tolerance` | `0.15` | X-Y error norm considered aligned [m] |
 | `align_dwell_time` | `2.0` | time within tolerance before `ALIGNED` [s] |
 | `align_hysteresis` | `1.5` | tolerance multiplier to leave `ALIGNED` |
 | `tag_timeout` | `1.0` | detection staleness threshold [s] |
 
-### `mock_ar_tag_publisher.py`
+### `aruco_detector.py` (default tag source)
+
+Real detection: subscribes to the down-facing camera, detects the ArUco
+marker with `cv2.aruco`, estimates its metric pose from the camera
+intrinsics (`camera_info`) and the known marker size, transforms it into
+body FLU using the fixed camera mount, and publishes `ibvs/tag_pose` —
+the identical interface the mock used, so the controller is unchanged.
+
+| Interface | Name | Type |
+|---|---|---|
+| sub | `camera/color/image_raw` | `sensor_msgs/Image` |
+| sub | `camera/color/camera_info` | `sensor_msgs/CameraInfo` |
+| pub | `ibvs/tag_pose` | `geometry_msgs/PoseStamped` (body FLU) |
+| pub | `ibvs/debug_image` | `sensor_msgs/Image` (detections drawn; only rendered when subscribed — `rqt_image_view` is pre-typed in the visualization window) |
+
+| Param | Default | Meaning |
+|---|---|---|
+| `~marker_id` | `0` | ArUco id to accept |
+| `~marker_length` | `0.20` | marker side [m] — must match the printed/simulated size or distances scale wrong |
+| `~process_rate` | `15.0` | detection rate [Hz]; camera frames arriving faster are skipped |
+| `~dictionary` | `DICT_4X4_50` | any `cv2.aruco.DICT_*` name |
+| `~camera_xyz` | `[0, 0, -0.05]` | camera mount position on the body (must match the URDF `camera_joint`) |
+| `~camera_rpy` | `[-1.570796, 1.570796, 0]` | camera mount orientation (URDF rpy) |
+
+With the down-facing mount the optical→body transform reduces to
+`tag_body = (t_opt.x, −t_opt.y, −t_opt.z) + camera_xyz`. No tilt
+compensation is applied (fine below ~10° of tilt).
+
+### `mock_ar_tag_publisher.py` (`use_mock_tag:=true`)
 
 Fakes an AR-tag detector. Reads real odometry, subtracts it from a fixed tag
 position in the local/world frame, rotates into body FLU (yaw only), and
@@ -335,13 +390,17 @@ rosservice call /$UAV_NAMESPACE/ibvs/start
 rosservice call /$UAV_NAMESPACE/ibvs/stop
 ```
 
-Expected sequence (watch `ibvs/state` in the `status` window):
+Expected sequence (watch `ibvs/state` in the `status` window, and the
+camera in `rqt_image_view` on `ibvs/debug_image`):
 
-1. `ibvs/takeoff` → `WAIT_ARM` → `CLIMB` (3 s, thrust `0.6`) → **`HOVER`,
-   holding position**. Nothing else happens until you say so.
-2. `ibvs/start` → `ALIGN`: tilts toward the tag, regulates height to the
-   1 m standoff.
-3. `ALIGNED`: error < 15 cm for 2 s → holding under the tag.
+1. `ibvs/takeoff` → `WAIT_ARM` → `CLIMB` (thrust `0.6` until 2 m) →
+   **holding position at 2 m**. Nothing else happens until you say so.
+2. Watch `ibvs/state`: when the down-facing camera picks up the marker it
+   flips `HOVER` → **`TAG_IN_SIGHT`** — that's your cue.
+3. `ibvs/start` → `ALIGN`: first centers the tag laterally (the descend
+   gate blocks descent while off-center), then descends onto it,
+   regulating the standoff to `target_z` above the tag.
+4. `ALIGNED`: error < 15 cm for 2 s → holding centered above the tag.
 
 There is intentionally **no** `control_manager` takeoff service call — no
 tracker/controller is running; the `CLIMB` state *is* the takeoff. Note that

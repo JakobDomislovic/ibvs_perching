@@ -1,0 +1,21 @@
+material ArTag/Marker
+{
+  technique
+  {
+    pass
+    {
+      // flat, fully lit so the marker is always crisp for detection
+      ambient 1 1 1 1
+      diffuse 1 1 1 1
+      specular 0 0 0 1
+      emissive 0.9 0.9 0.9 1
+
+      texture_unit
+      {
+        texture aruco_id0.png
+        filtering anisotropic
+        max_anisotropy 16
+      }
+    }
+  }
+}

@@ -16,13 +16,23 @@ windows:
   - gazebo:
       layout: tiled
       panes:
+        # custom kopterworx xacro: down-facing camera directly under the base
+        # (stock down_facing_camera hangs 0.3 m low / 0.2 m left -- it would
+        # touch the tag at the 0.3 m target altitude)
+        # spawn 1 m away from the tag (which sits at the world origin) so the
+        # camera doesn't start on top of it and the alignment is visible
         - waitForRos; roslaunch ardupilot_gazebo kopterworx.launch
           use_sim_time:=true
+          x:=0.0 y:=0.0
+          camera_pose:=down_facing_camera
+          model:=$(rospack find ibvs_perching)/urdf/kopterworx_downcam.urdf.xacro
   - visualization:
       layout: tiled
       panes:
-        - history -s "rosrun plotjuggler plotjuggler -l $(rospack find perching_uav)/config/plotjuggler.xml"
+        # IBVS command signals: body rates, thrust/climb-rate, tag error, altitude
+        - history -s "rosrun plotjuggler plotjuggler -l $(rospack find ibvs_perching)/config/plotjuggler_ibvs.xml"
         - history -s "rosrun rviz rviz -d $(rospack find perching_uav)/config/rviz_sim_jd.rviz"
+        - history -s "rosrun rqt_image_view rqt_image_view /$UAV_NAMESPACE/ibvs/debug_image"
   - ibvs:
       layout: tiled
       panes:

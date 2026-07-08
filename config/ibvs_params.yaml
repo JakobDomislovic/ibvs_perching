@@ -15,10 +15,15 @@ control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 # Takeoff therefore REQUIRES a value above 0.5 -- that is climb_thrust.
 # ---------------------------------------------------------------------------
 hover_thrust: 0.5             # zero-climb-rate ("hover") command
-climb_thrust: 0.6             # sent during CLIMB -> this is what makes it take off
-thrust_min: 0.35              # clamp: gentlest allowed descent command
-thrust_max: 0.7               # clamp: strongest allowed climb command
-target_z: 1.0                 # [m] desired tag height above the vehicle (standoff)
+climb_thrust: 0.52            # sent during CLIMB -> this is what makes it take off
+thrust_min: 0.45              # clamp: gentlest allowed descent command
+thrust_max: 0.6               # clamp: strongest allowed climb command
+takeoff_height: 1.0           # [m] CLIMB ends when odometry z reaches this
+
+# Desired tag height ABOVE the vehicle. The AR tag lies on the floor, so it
+# is BELOW the vehicle: negative value. -0.3 => hover 0.3 m above the tag
+# (world z ~0.3 with the tag plate on the ground at z~0.02).
+target_z: -0.5
 
 # ---------------------------------------------------------------------------
 # X-Y axis -- closed-loop IBVS cascade on the tag position error
@@ -30,6 +35,8 @@ target_z: 1.0                 # [m] desired tag height above the vehicle (stando
 # ---------------------------------------------------------------------------
 target_x: 0.0                 # desired relative tag x (forward) offset [m]
 target_y: 0.0                 # desired relative tag y (left) offset [m]
+descend_xy_gate: 0.25         # [m] descend only while centered within this radius
+                              # (keeps the tag inside the shrinking camera FOV)
 
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
 kp_att: 1.5                   # body rate per rad of attitude error [1/s]
@@ -47,13 +54,15 @@ kv_hover: 0.25                # velocity damping for the position hold [rad per 
 # i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.1                    # desired tilt per meter of tag error [rad/m]
+  kp: 0.10                    # desired tilt per meter of tag error [rad/m]
   ki: 0.0                     # [rad per m*s]
-  kd: 0.0                     # [rad per m/s]
+  kd: 0.15                    # [rad per m/s] -- NEEDED for the camera descent:
+                              # with kd 0 the undamped X-Y oscillation outruns
+                              # the shrinking FOV and the tag leaves the frame
   i_max: 0.05                 # [rad] max integral contribution
 
 pid_z:
-  kp: 0.2                     # climb-rate delta per meter of tag z error [1/m]
+  kp: 0.1                     # climb-rate delta per meter of tag z error [1/m]
   ki: 0.0                     # [1 per m*s]
   kd: 0.0                     # [1 per m/s]
   i_max: 0.1                  # max integral contribution
@@ -61,8 +70,11 @@ pid_z:
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
-climb_settle_time: 3.0        # [s] pure climb (takeoff) before X-Y correction kicks in
+climb_settle_time: 10.0       # [s] CLIMB fallback timeout if takeoff_height is never reached
 align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
-tag_timeout: 1.0              # [s] no tag message within this time -> TAG_LOST
+tag_timeout: 0.5              # [s] no tag message within this time -> TAG_LOST
+                              # (short: at 30 fps detection, 0.5 s of silence is
+                              # a real loss, and stale-data descent near the
+                              # ground must stop quickly)

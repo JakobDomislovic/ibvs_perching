@@ -43,10 +43,11 @@ Control split:
 State machine (this is what makes the controller "modal"):
 
     WAIT_ARM --(ibvs/takeoff called; armed & GUIDED_NOGPS confirmed)--> CLIMB
-    CLIMB --(climb_settle_time elapsed, servoing NOT started)--> HOVER
-    CLIMB --(climb_settle_time elapsed, started & tag seen)--> ALIGN
-    CLIMB --(climb_settle_time elapsed, started, NO tag)--> TAG_LOST
-    HOVER --(ibvs/start called & tag seen)--> ALIGN
+    CLIMB --(takeoff_height reached, servoing NOT started)--> HOVER / TAG_IN_SIGHT
+    CLIMB --(takeoff_height reached, started & tag seen)--> ALIGN
+    CLIMB --(takeoff_height reached, started, NO tag)--> TAG_LOST
+    HOVER <--(tag detection appears / disappears)--> TAG_IN_SIGHT
+    HOVER/TAG_IN_SIGHT --(ibvs/start called & tag seen)--> ALIGN
     ALIGN --(|error| < tol for align_dwell_time)--> ALIGNED
     ALIGNED --(|error| > tol * hysteresis)--> ALIGN
     (any state) --(disarmed / mode changed)--> WAIT_ARM
@@ -54,9 +55,15 @@ State machine (this is what makes the controller "modal"):
     (ALIGN/ALIGNED) --(no tag for tag_timeout)--> TAG_LOST
     TAG_LOST --(tag seen again)--> ALIGN
 
+TAG_IN_SIGHT behaves exactly like HOVER (position hold at the same latched
+point); it is a status distinction for the operator: the detector currently
+sees the tag, so `ibvs/start` will engage immediately. Call ibvs/start when
+`ibvs/state` shows TAG_IN_SIGHT.
+
 Two-step mission (both std_srvs/Trigger):
-    1. `ibvs/takeoff` -- switches to GUIDED_NOGPS, arms, climbs
-       climb_settle_time seconds, then HOLDS position (HOVER).
+    1. `ibvs/takeoff` -- switches to GUIDED_NOGPS, arms, climbs to
+       takeoff_height meters (climb_settle_time is the fallback timeout),
+       then HOLDS position (HOVER).
     2. `ibvs/start`   -- starts servoing toward the tag (ALIGN).
     `ibvs/stop` aborts servoing back to HOVER at any time. Arming the
     vehicle manually does NOT make it climb; only ibvs/takeoff does.
@@ -87,9 +94,13 @@ from std_srvs.srv import Trigger, TriggerResponse
 WAIT_ARM = 'WAIT_ARM'
 CLIMB = 'CLIMB'
 HOVER = 'HOVER'
+TAG_IN_SIGHT = 'TAG_IN_SIGHT'
 ALIGN = 'ALIGN'
 ALIGNED = 'ALIGNED'
 TAG_LOST = 'TAG_LOST'
+
+# states that hold the latched position (everything flying except servoing)
+HOLD_STATES = (CLIMB, HOVER, TAG_IN_SIGHT, TAG_LOST)
 
 
 def clamp(value, low, high):
@@ -140,6 +151,11 @@ class IbvsController:
         self.thrust_min = rospy.get_param('~thrust_min', 0.35)
         self.thrust_max = rospy.get_param('~thrust_max', 0.7)
         self.target_z = rospy.get_param('~target_z', 1.0)
+        self.takeoff_height = rospy.get_param('~takeoff_height', 2.0)
+        # descend only while laterally centered on the tag: descending
+        # off-center shrinks the camera FOV faster than the X-Y loop
+        # converges and the tag falls out of frame (flight-tested)
+        self.descend_xy_gate = rospy.get_param('~descend_xy_gate', 0.25)
 
         # X-Y axis (IBVS cascade: PID on tag error -> desired tilt -> body rate)
         self.target_x = rospy.get_param('~target_x', 0.0)
@@ -290,11 +306,12 @@ class IbvsController:
                 self.pid_x.reset()
                 self.pid_y.reset()
                 self.pid_z.reset()
-            # Latch the spot that HOVER/TAG_LOST hold: the takeoff point when
+            # Latch the spot the hold states keep: the takeoff point when
             # CLIMB starts, or wherever the vehicle is when servoing stops /
-            # the tag is lost. CLIMB -> HOVER keeps the takeoff latch.
+            # the tag is lost. HOVER <-> TAG_IN_SIGHT keep the same latch
+            # (only the label changes), as does CLIMB -> HOVER/TAG_IN_SIGHT.
             if new_state == CLIMB or new_state == TAG_LOST or \
-                    (new_state == HOVER and self.state != CLIMB):
+                    (new_state == HOVER and self.state not in (CLIMB, TAG_IN_SIGHT)):
                 self.latch_hold_position()
             self.state = new_state
             self.state_entered_at = rospy.Time.now()
@@ -323,17 +340,28 @@ class IbvsController:
             if self.takeoff_requested:
                 self.transition(CLIMB)
         elif self.state == CLIMB:
-            if self.time_in_state() >= self.climb_settle_time:
+            # climb until takeoff_height; climb_settle_time is the fallback
+            # timeout in case odometry never reports the altitude
+            reached_height = (
+                self.last_odom is not None and
+                self.last_odom.pose.pose.position.z >= self.takeoff_height)
+            if reached_height or self.time_in_state() >= self.climb_settle_time:
                 self.takeoff_requested = False   # consumed; next takeoff needs a new call
                 if not self.servo_active:
-                    self.transition(HOVER)
+                    self.transition(TAG_IN_SIGHT if self.tag_is_fresh() else HOVER)
                 else:
                     # Never climb blindly forever: without a tag, hold instead.
                     self.transition(ALIGN if self.tag_is_fresh() else TAG_LOST)
         elif not self.servo_active:
-            # ibvs/stop (or never started): hold position in HOVER
-            self.transition(HOVER)
-        elif self.state == HOVER:
+            # not servoing: hold position; TAG_IN_SIGHT tells the operator
+            # the detector sees the tag, i.e. ibvs/start will work
+            if self.state not in (HOVER, TAG_IN_SIGHT):
+                self.transition(HOVER)           # e.g. ibvs/stop while servoing
+            elif self.state == HOVER and self.tag_is_fresh():
+                self.transition(TAG_IN_SIGHT)
+            elif self.state == TAG_IN_SIGHT and not self.tag_is_fresh():
+                self.transition(HOVER)
+        elif self.state in (HOVER, TAG_IN_SIGHT):
             self.transition(ALIGN if self.tag_is_fresh() else TAG_LOST)
         elif self.state in (ALIGN, ALIGNED) and not self.tag_is_fresh():
             self.transition(TAG_LOST)
@@ -357,6 +385,15 @@ class IbvsController:
                 # stationary tag: d(tag_z)/dt = -climb velocity
                 z_err_dot = -self.last_odom.twist.twist.linear.z
             delta = self.pid_z.update(z_err, z_err_dot, self.dt)
+
+            # landing funnel: never descend while laterally off-center,
+            # otherwise the tag exits the shrinking camera FOV
+            lateral_error = (
+                (self.target_x - self.last_tag.pose.position.x) ** 2 +
+                (self.target_y - self.last_tag.pose.position.y) ** 2) ** 0.5
+            if delta < 0.0 and lateral_error > self.descend_xy_gate:
+                delta = 0.0
+
             return self.hover_thrust + delta
 
         # WAIT_ARM (ignored while disarmed) and TAG_LOST: hold altitude.
@@ -384,7 +421,7 @@ class IbvsController:
         # signs as the tag law, with the latched point playing the tag.
         desired_pitch = 0.0
         desired_roll = 0.0
-        if self.hold_position is not None and self.state in (CLIMB, HOVER, TAG_LOST):
+        if self.hold_position is not None and self.state in HOLD_STATES:
             pos = self.last_odom.pose.pose.position
             ex = self.hold_position[0] - pos.x
             ey = self.hold_position[1] - pos.y

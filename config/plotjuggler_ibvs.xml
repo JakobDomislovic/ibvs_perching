@@ -1,0 +1,100 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<root>
+ <tabbed_widget parent="main_window" name="Main Window">
+  <Tab tab_name="ibvs commands" containers="1">
+   <Container>
+    <DockSplitter count="2" orientation="|" sizes="0.5;0.5">
+     <DockSplitter count="3" orientation="-" sizes="0.33;0.33;0.34">
+      <DockArea name="body rate commands">
+       <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
+        <range bottom="-0.4" right="60" top="0.4" left="0"/>
+        <limitY/>
+        <curve color="#1f77b4" name="/red/mavros/setpoint_raw/attitude/body_rate/x"/>
+        <curve color="#d62728" name="/red/mavros/setpoint_raw/attitude/body_rate/y"/>
+        <curve color="#2ca02c" name="/red/mavros/setpoint_raw/attitude/body_rate/z"/>
+       </plot>
+      </DockArea>
+      <DockArea name="thrust (climb rate) command">
+       <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
+        <range bottom="0.3" right="60" top="0.7" left="0"/>
+        <limitY/>
+        <curve color="#ff7f0e" name="/red/mavros/setpoint_raw/attitude/thrust"/>
+       </plot>
+      </DockArea>
+      <DockArea name="altitude">
+       <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
+        <range bottom="0" right="60" top="2.5" left="0"/>
+        <limitY/>
+        <curve color="#9467bd" name="/red/mavros/local_position/odom/pose/pose/position/z"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+     <DockSplitter count="3" orientation="-" sizes="0.33;0.33;0.34">
+      <DockArea name="tag error xy (body FLU)">
+       <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
+        <range bottom="-2" right="60" top="2" left="0"/>
+        <limitY/>
+        <curve color="#1f77b4" name="/red/ibvs/tag_pose/pose/position/x"/>
+        <curve color="#d62728" name="/red/ibvs/tag_pose/pose/position/y"/>
+       </plot>
+      </DockArea>
+      <DockArea name="tag z (below vehicle = negative)">
+       <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
+        <range bottom="-2.5" right="60" top="0" left="0"/>
+        <limitY/>
+        <curve color="#2ca02c" name="/red/ibvs/tag_pose/pose/position/z"/>
+       </plot>
+      </DockArea>
+      <DockArea name="body velocity">
+       <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
+        <range bottom="-1" right="60" top="1" left="0"/>
+        <limitY/>
+        <curve color="#1f77b4" name="/red/mavros/local_position/odom/twist/twist/linear/x"/>
+        <curve color="#d62728" name="/red/mavros/local_position/odom/twist/twist/linear/y"/>
+        <curve color="#2ca02c" name="/red/mavros/local_position/odom/twist/twist/linear/z"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+    </DockSplitter>
+   </Container>
+  </Tab>
+  <currentTabIndex index="0"/>
+ </tabbed_widget>
+ <use_relative_time_offset enabled="1"/>
+ <!-- - - - - - - - - - - - - - - -->
+ <Plugins>
+  <plugin ID="DataLoad CSV">
+   <parameters delimiter="0" time_axis=""/>
+  </plugin>
+  <plugin ID="DataLoad ROS bags">
+   <use_header_stamp value="false"/>
+   <discard_large_arrays value="true"/>
+   <max_array_size value="100"/>
+   <boolean_strings_to_number value="true"/>
+   <remove_suffix_from_strings value="true"/>
+   <selected_topics value=""/>
+  </plugin>
+  <plugin ID="ROS Topic Subscriber">
+   <use_header_stamp value="false"/>
+   <discard_large_arrays value="true"/>
+   <max_array_size value="100"/>
+   <boolean_strings_to_number value="true"/>
+   <remove_suffix_from_strings value="true"/>
+   <selected_topics value="/red/mavros/setpoint_raw/attitude;/red/ibvs/tag_pose;/red/mavros/local_position/odom"/>
+  </plugin>
+  <plugin ID="UDP Server"/>
+  <plugin ID="WebSocket Server"/>
+  <plugin ID="ZMQ Subscriber"/>
+  <plugin ID="Fast Fourier Transform"/>
+  <plugin ID="Quaternion to RPY"/>
+  <plugin ID="CSV Exporter"/>
+  <plugin ID="ROS /rosout Visualization"/>
+  <plugin ID="ROS Topic Re-Publisher"/>
+ </Plugins>
+ <!-- - - - - - - - - - - - - - - -->
+ <previouslyLoaded_Datafiles/>
+ <previouslyLoaded_Streamer name="ROS Topic Subscriber"/>
+ <!-- - - - - - - - - - - - - - - -->
+ <customMathEquations/>
+ <snippets/>
+</root>

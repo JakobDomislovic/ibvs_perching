@@ -2,20 +2,45 @@
   <!-- IBVS AR-tag perching demo.
        Does NOT launch the uav_ros_stack tracker/controller: this talks
        to mavros/setpoint_raw/attitude directly. Arming + GUIDED_NOGPS mode
-       switching is handled by the startup script (see startup/sim_ibvs). -->
+       switching is handled by the ibvs/takeoff service (see startup/sim_ibvs).
+
+       By default this runs the REAL ArUco detection pipeline: it spawns a
+       30x30 cm ArUco tag (DICT_4X4_50, id 0) on the floor at the origin and
+       detects it with the UAV's down-facing camera. The camera comes from
+       the kopterworx model; launch it with
+         model:=$(find ibvs_perching)/urdf/kopterworx_downcam.urdf.xacro
+         camera_pose:=down_facing_camera
+       (already done in startup/sim_ibvs/session.yml). -->
 
   <arg name="namespace" default="$(env UAV_NAMESPACE)"/>
   <arg name="config" default="$(find ibvs_perching)/config/ibvs_params.yaml"/>
 
-  <!-- Set to false to feed a real AR-tag detector instead of the mock -->
-  <arg name="use_mock_tag" default="true"/>
+  <!-- Real ArUco detection (default) vs the odometry-based mock -->
+  <arg name="use_mock_tag" default="false"/>
   <arg name="tag_world_position" default="[-1.0, 0.0, 1.5]"/>
   <arg name="odom_topic" default="mavros/local_position/odom"/>
+
+  <!-- AR tag model spawned on the floor at the world origin -->
+  <arg name="spawn_ar_tag" default="true"/>
+  <arg name="ar_tag_x" default="0.0"/>
+  <arg name="ar_tag_y" default="0.0"/>
 
   <group ns="$(arg namespace)">
 
     <node pkg="ibvs_perching" type="ibvs_controller.py" name="ibvs_controller" output="screen">
       <rosparam file="$(arg config)" command="load"/>
+    </node>
+
+    <!-- real detector: down-facing camera -> tag pose in body FLU -->
+    <node unless="$(arg use_mock_tag)"
+          pkg="ibvs_perching" type="aruco_detector.py" name="aruco_detector" output="screen">
+      <param name="marker_id" value="0"/>
+      <param name="marker_length" value="0.20"/>
+      <param name="process_rate" value="15.0"/>
+      <param name="dictionary" value="DICT_4X4_50"/>
+      <!-- must match the camera_joint of kopterworx_downcam.urdf.xacro -->
+      <rosparam param="camera_xyz">[0.0, 0.0, -0.05]</rosparam>
+      <rosparam param="camera_rpy">[-1.570796, 1.570796, 0.0]</rosparam>
     </node>
 
     <node if="$(arg use_mock_tag)"
@@ -25,4 +50,11 @@
     </node>
 
   </group>
+
+  <!-- the tag plate itself (40x40 cm white plate, 30 cm marker), on the floor -->
+  <node if="$(arg spawn_ar_tag)"
+        pkg="gazebo_ros" type="spawn_model" name="spawn_ar_tag"
+        args="-sdf -file $(find ibvs_perching)/models/ar_tag/model.sdf
+              -model ar_tag -x $(arg ar_tag_x) -y $(arg ar_tag_y) -z 0.01"/>
+
 </launch>
