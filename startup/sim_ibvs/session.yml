@@ -1,0 +1,52 @@
+name: ibvs_perching_sim
+root: ./
+startup_window: ibvs
+pre_window: export UAV_NAMESPACE=red
+windows:
+  - roscore:
+      layout: tiled
+      panes:
+        - roscore
+        # GPS_TYPEX=0 in parameters to disable GPS!
+        - export SITL_RITW_TERMINAL="tmux new-window -d -n:ardupilot1"; waitForRos;
+          roslaunch ardupilot_gazebo sim_vehicle.launch
+          enable_console:=false
+          additional_arguments:="--no-rebuild"
+        - waitForRos; rosparam set use_sim_time true; roslaunch ardupilot_gazebo mavros.launch
+  - gazebo:
+      layout: tiled
+      panes:
+        - waitForRos; roslaunch ardupilot_gazebo kopterworx.launch
+          use_sim_time:=true
+  - visualization:
+      layout: tiled
+      panes:
+        - history -s "rosrun plotjuggler plotjuggler -l $(rospack find perching_uav)/config/plotjuggler.xml"
+        - history -s "rosrun rviz rviz -d $(rospack find perching_uav)/config/rviz_sim_jd.rviz"
+  - ibvs:
+      layout: tiled
+      panes:
+        # NOTE: on purpose we do NOT launch uav_ros_control's
+        # control_manager_nodelet (tracker/controller) here -- ibvs_controller
+        # talks to mavros/setpoint_raw/attitude directly.
+        #
+        # GUID_OPTIONS must be 0 so ArduPilot interprets AttitudeTarget.thrust
+        # as a CLIMB RATE (0.5 = hover). The kopterworx identity.parm ships
+        # with GUID_OPTIONS=8 (raw thrust, for the uav_ros_stack MPC) which
+        # makes this controller fly away!
+        - waitForRos; waitForSysStatus; rosrun mavros mavparam -n $UAV_NAMESPACE/mavros set GUID_OPTIONS 0;
+          roslaunch ibvs_perching ibvs_perching.launch
+        - history -s "waitForRos; waitForSimulation;
+          rosservice call /$UAV_NAMESPACE/mavros/set_mode 0 GUIDED_NOGPS;
+          sleep 2;
+          rosservice call /$UAV_NAMESPACE/mavros/cmd/arming true"
+        - history -s "rosservice call /$UAV_NAMESPACE/mavros/cmd/arming false"
+        - history -s "./../../bags/bagger.sh"
+  - status:
+      layout: tiled
+      panes:
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/tag_pose
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/local_position/odom

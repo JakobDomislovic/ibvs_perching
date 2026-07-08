@@ -1,0 +1,28 @@
+<launch>
+  <!-- IBVS AR-tag perching demo.
+       Does NOT launch the uav_ros_stack tracker/controller: this talks
+       to mavros/setpoint_raw/attitude directly. Arming + GUIDED_NOGPS mode
+       switching is handled by the startup script (see startup/sim_ibvs). -->
+
+  <arg name="namespace" default="$(env UAV_NAMESPACE)"/>
+  <arg name="config" default="$(find ibvs_perching)/config/ibvs_params.yaml"/>
+
+  <!-- Set to false to feed a real AR-tag detector instead of the mock -->
+  <arg name="use_mock_tag" default="true"/>
+  <arg name="tag_world_position" default="[-2.0, 0.0, 1.5]"/>
+  <arg name="odom_topic" default="mavros/local_position/odom"/>
+
+  <group ns="$(arg namespace)">
+
+    <node pkg="ibvs_perching" type="ibvs_controller.py" name="ibvs_controller" output="screen">
+      <rosparam file="$(arg config)" command="load"/>
+    </node>
+
+    <node if="$(arg use_mock_tag)"
+          pkg="ibvs_perching" type="mock_ar_tag_publisher.py" name="mock_ar_tag_publisher" output="screen">
+      <param name="odom_topic" value="$(arg odom_topic)"/>
+      <rosparam param="tag_world_position" subst_value="true">$(arg tag_world_position)</rosparam>
+    </node>
+
+  </group>
+</launch>

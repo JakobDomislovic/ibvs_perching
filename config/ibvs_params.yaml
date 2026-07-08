@@ -1,0 +1,63 @@
+# ibvs_controller.py parameters
+#
+# The controller is a small state machine (see ibvs_controller.py) that
+# talks to ArduPilot directly through mavros/setpoint_raw/attitude, i.e.
+# WITHOUT the uav_ros_stack tracker/controller running.
+
+control_rate: 20.0            # [Hz] rate at which AttitudeTarget is published
+
+# ---------------------------------------------------------------------------
+# Z axis -- climb rate through the AttitudeTarget "thrust" field.
+#
+# In GUIDED/GUIDED_NOGPS ArduPilot interprets thrust as a CLIMB RATE
+# (unless GUID_OPTIONS bit 3 is set):
+#   0.0 = max descent, 0.5 = zero climb rate (hover), 1.0 = max climb.
+# Takeoff therefore REQUIRES a value above 0.5 -- that is climb_thrust.
+# ---------------------------------------------------------------------------
+hover_thrust: 0.5             # zero-climb-rate ("hover") command
+climb_thrust: 0.6             # sent during CLIMB -> this is what makes it take off
+thrust_min: 0.35              # clamp: gentlest allowed descent command
+thrust_max: 0.7               # clamp: strongest allowed climb command
+target_z: 1.0                 # [m] desired tag height above the vehicle (standoff)
+
+# ---------------------------------------------------------------------------
+# X-Y axis -- closed-loop IBVS cascade on the tag position error
+# (expressed in the body FLU frame: x-forward, y-left, z-up):
+#   desired_tilt = PID_xy(tag error)                  (clamped to max_tilt)
+#   body_rate    = kp_att * (desired_tilt - current_tilt)
+# A raw rate command proportional to position error is UNSTABLE (the rate
+# integrates into an unbounded tilt); the attitude inner loop is required.
+# ---------------------------------------------------------------------------
+target_x: 0.0                 # desired relative tag x (forward) offset [m]
+target_y: 0.0                 # desired relative tag y (left) offset [m]
+
+max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
+kp_att: 1.5                   # body rate per rad of attitude error [1/s]
+max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s)
+
+# ---------------------------------------------------------------------------
+# PID gains. I and D start at 0 (pure P) -- raise them only when tuning.
+# The D-term uses body velocity from odometry (equivalent to velocity
+# damping; kd_xy ~ 0.25 was flight-tested and smooths the approach).
+# i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
+# ---------------------------------------------------------------------------
+pid_xy:
+  kp: 0.15                    # desired tilt per meter of tag error [rad/m]
+  ki: 0.0                     # [rad per m*s]
+  kd: 0.0                     # [rad per m/s]
+  i_max: 0.05                 # [rad] max integral contribution
+
+pid_z:
+  kp: 0.2                     # climb-rate delta per meter of tag z error [1/m]
+  ki: 0.0                     # [1 per m*s]
+  kd: 0.0                     # [1 per m/s]
+  i_max: 0.1                  # max integral contribution
+
+# ---------------------------------------------------------------------------
+# State machine timing / thresholds
+# ---------------------------------------------------------------------------
+climb_settle_time: 3.0        # [s] pure climb (takeoff) before X-Y correction kicks in
+align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
+align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
+tag_timeout: 1.0              # [s] no tag message within this time -> TAG_LOST
