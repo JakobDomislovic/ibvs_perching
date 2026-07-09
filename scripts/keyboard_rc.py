@@ -52,8 +52,8 @@ import time
 import tty
 
 import rospy
-from mavros_msgs.msg import OverrideRCIn, State
-from mavros_msgs.srv import CommandBool, SetMode
+from mavros_msgs.msg import OverrideRCIn, ParamValue, State
+from mavros_msgs.srv import CommandBool, ParamSet, SetMode
 
 PWM_MID = 1500
 PWM_LOW = 1100
@@ -91,6 +91,31 @@ class KeyboardRc:
     def state_callback(self, msg):
         self.armed = msg.armed
         self.mode = msg.mode
+
+    def ensure_override_accepted(self):
+        """Make ArduPilot accept our overrides: SYSID_MYGCS must be 1.
+
+        ArduPilot only honors RC_CHANNELS_OVERRIDE coming from the system
+        id stored in SYSID_MYGCS, which defaults to 255 (MAVProxy) --
+        mavros sends with system id 1, so without this every override is
+        SILENTLY ignored and the keyboard "does nothing". Retries while
+        SITL/mavros are still coming up.
+        """
+        param_set = rospy.ServiceProxy('mavros/param/set', ParamSet)
+        deadline = time.time() + 60.0
+        while time.time() < deadline and not rospy.is_shutdown():
+            try:
+                res = param_set(param_id='SYSID_MYGCS',
+                                value=ParamValue(integer=1, real=0.0))
+                if res.success:
+                    print('keyboard_rc: SYSID_MYGCS=1 -- RC override enabled')
+                    return
+            except (rospy.ServiceException, rospy.ROSException):
+                pass
+            print('keyboard_rc: waiting for mavros/FCU (setting SYSID_MYGCS=1)...')
+            time.sleep(2.0)
+        print('keyboard_rc: WARNING: could not set SYSID_MYGCS=1 -- '
+              'ArduPilot will IGNORE the overrides (sticks will do nothing)')
 
     def press(self, axis, value):
         self.deflection[axis] = value
@@ -195,8 +220,10 @@ class KeyboardRc:
             data += sys.stdin.read(1)
         i = 0
         while i < len(data):
-            if data[i] == '\x1b' and data[i + 1:i + 2] == '[':
-                keys.append(data[i:i + 3])
+            # arrows arrive as ESC [ X (CSI) or ESC O X (application mode,
+            # e.g. under some tmux/terminal configs); normalize to ESC [ X
+            if data[i] == '\x1b' and data[i + 1:i + 2] in ('[', 'O'):
+                keys.append('\x1b[' + data[i + 2:i + 3])
                 i += 3
             else:
                 keys.append(data[i])
@@ -219,6 +246,7 @@ class KeyboardRc:
 def main():
     rospy.init_node('keyboard_rc')
     node = KeyboardRc()
+    node.ensure_override_accepted()
     fd = sys.stdin.fileno()
     old_attrs = termios.tcgetattr(fd)
     tty.setcbreak(fd)

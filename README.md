@@ -533,18 +533,25 @@ instead of climb rate and the controller **flies away** (section 2).
 **Rehearsing this flow in simulation.** `scripts/keyboard_rc.py` is a
 keyboard "RC transmitter" for SITL: it flies the vehicle through
 `mavros/rc/override`, so ArduPilot sees real RC input (and reports it on
-`mavros/rc/in` — `rc_to_joy.py` works in sim unchanged). In the sim
-session (`startup/sim_ibvs`), kill the launch pane, relaunch with the rw
-config (pre-typed in history), then:
+`mavros/rc/in`, which is why the same `rc_to_joy` bridge works in sim).
+On startup it sets `SYSID_MYGCS = 1` on the FCU — without that ArduPilot
+only accepts overrides from MAVProxy (sysid 255) and silently ignores
+mavros, i.e. the keyboard would do nothing.
+
+In the sim session (`startup/sim_ibvs`) the `joystick` window has it
+pre-typed (press ↑). Flying manually works with the normal sim session as
+is. To rehearse the **engagement**, the controller must run with the rw
+config — kill the launch in the `ibvs` window's first pane and run:
 
 ```bash
-rosrun ibvs_perching keyboard_rc.py __ns:=$UAV_NAMESPACE
+roslaunch ibvs_perching ibvs_perching.launch \
+  config:=$(rospack find ibvs_perching)/startup/real_world/custom_config/ibvs_params_rw.yaml
 ```
 
-`o` arm → `2` ALT_HOLD → hold `w` to climb → arrows (roll/pitch) and
-`a`/`d` (yaw) to fly over the tag → the first detection engages
-`GUIDED_NOGPS` by itself. Press `2` to "take over" like the safety pilot
-(the controller must not steal the mode back), `g` to hand control back,
-`q` to quit (releases all overrides). Sticks spring back to center when
-a key is released; fly in ALT_HOLD, not STABILIZE — centered throttle
-holds altitude, which is what keyboard flying needs.
+Then in the `joystick` window: `o` arm → `2` ALT_HOLD → hold `w` to climb
+→ arrows (roll/pitch) and `a`/`d` (yaw) to fly over the tag → the first
+detection engages `GUIDED_NOGPS` by itself. Press `2` to "take over" like
+the safety pilot (the controller must not steal the mode back), `g` to
+hand control back, `q` to quit (releases all overrides). Sticks spring
+back to center when a key is released; fly in ALT_HOLD, not STABILIZE —
+centered throttle holds altitude, which is what keyboard flying needs.

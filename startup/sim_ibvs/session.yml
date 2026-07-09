@@ -53,18 +53,14 @@ windows:
         - history -s "rosservice call /$UAV_NAMESPACE/ibvs/stop"
         - history -s "rosservice call /$UAV_NAMESPACE/mavros/cmd/arming false"
         - history -s "./../../bags/bagger.sh"
-        # rehearse the REAL-WORLD flow (see startup/real_world): kill the
-        # launch pane above, press up here to relaunch with the rw config
-        # (engage_on_target), then fly manually from the joystick window --
-        # the first tag detection engages GUIDED_NOGPS by itself
-        - history -s "roslaunch ibvs_perching ibvs_perching.launch config:=$(rospack find ibvs_perching)/startup/real_world/custom_config/ibvs_params_rw.yaml"
   - joystick:
       layout: tiled
       panes:
-        # keyboard "RC transmitter" for SITL -- flies through mavros/rc/override,
+        # keyboard "RC transmitter" for SITL -- flies through mavros/rc/override
+        # (sets SYSID_MYGCS=1 itself, otherwise ArduPilot ignores overrides).
         # GRABS THE KEYBOARD in this pane, so start it yourself (press up):
         # o = arm, 2 = ALT_HOLD, w = climb, arrows = roll/pitch, a/d = yaw,
-        # 2 mid-align = safety-pilot takeover, g = hand back, q = quit
+        # q = quit. Rehearsing the real-world engagement: see README sec. 12.
         - history -s "rosrun ibvs_perching keyboard_rc.py __ns:=$UAV_NAMESPACE"
         # same RC->joy bridge as the real vehicle (reads mavros/rc/in, which
         # reflects the overrides) -- /$UAV_NAMESPACE/joy works in sim too
