@@ -46,16 +46,6 @@ windows:
         # makes this controller fly away!
         - waitForRos; waitForSysStatus; rosrun mavros mavparam -n $UAV_NAMESPACE/mavros set GUID_OPTIONS 0;
           roslaunch ibvs_perching ibvs_perching.launch
-        # STEP 1 -- takeoff: sets GUIDED_NOGPS, arms, climbs, then HOLDS position
-        - history -s "rosservice call /$UAV_NAMESPACE/ibvs/takeoff"
-        # STEP 2 -- start aligning toward the tag (ibvs/stop returns to hover)
-        - history -s "rosservice call /$UAV_NAMESPACE/ibvs/start"
-        - history -s "rosservice call /$UAV_NAMESPACE/ibvs/stop"
-        - history -s "rosservice call /$UAV_NAMESPACE/mavros/cmd/arming false"
-        - history -s "./../../bags/bagger.sh"
-  - joystick:
-      layout: tiled
-      panes:
         # keyboard "RC transmitter" for SITL -- flies through mavros/rc/override
         # (sets SYSID_MYGCS=1 itself, otherwise ArduPilot ignores overrides).
         # GRABS THE KEYBOARD in this pane, so start it yourself (press up):
@@ -63,6 +53,12 @@ windows:
         # i = START IBVS (the next tag detection then takes over -- this is
         # the future real-joystick button), k = stop, q = quit. README sec. 12.
         - history -s "rosrun ibvs_perching keyboard_rc.py __ns:=$UAV_NAMESPACE"
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
+        - history -s "./../../bags/bagger.sh"
+  - joystick:
+      layout: tiled
+      panes:
         # same RC->joy bridge as the real vehicle (reads mavros/rc/in, which
         # reflects the overrides) -- /$UAV_NAMESPACE/joy works in sim too
         - waitForRos; waitForMavros; roslaunch uav_ros_general rc_to_joy.launch
@@ -70,8 +66,6 @@ windows:
   - status:
       layout: tiled
       panes:
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/local_position/odom
