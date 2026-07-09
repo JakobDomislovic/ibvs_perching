@@ -98,27 +98,50 @@ body-rate control; see `ArduCopter/mode_guided.cpp`.)
 
 ```
    camera/color/image_raw ---> +--------------------------+
-   camera/color/camera_info    |     aruco_detector       |   (or mock_ar_tag_publisher
-   (down-facing camera)        |  cv2.aruco pose estimate |    when use_mock_tag:=true)
-                               +-----------+--------------+
-                                           | ibvs/tag_pose (PoseStamped,
-                                           |  tag position in body FLU)
+   camera/color/camera_info    |      VISION MODULE       |   (aruco_detector.py today;
+   (down-facing camera)        | detects "the point" in   |    mock_ar_tag_publisher.py
+                               | the image                |    with use_mock_tag:=true;
+                               +-----------+--------------+    your own node tomorrow)
+                                           | ibvs/target_point (PointStamped:
+                                           |  x,y = normalized offset from the
+                                           |  image center; z = distance or 0)
                                            v
    mavros/state ------------->  +--------------------------+
    (armed? GUIDED_NOGPS?)       |     ibvs_controller      |--> ibvs/state (String, latched)
    mavros/local_position/odom ->|  modal state machine +   |
-   (attitude, velocity, height) |  PID cascade on tag error|--> mavros/setpoint_raw/attitude
-                                +--------------------------+    (AttitudeTarget @ control_rate)
-                                                                     |
+   (attitude, velocity, height) |  PID cascade on image    |--> mavros/setpoint_raw/attitude
+                                |  point error             |    (AttitudeTarget @ control_rate)
+                                +--------------------------+         |
                                                                      v
                                                     MAVROS -> ArduPilot (SET_ATTITUDE_TARGET)
 ```
 
 Everything runs under the UAV namespace (`$UAV_NAMESPACE`, default `red`), so
-topic names above are relative (`/red/ibvs/tag_pose`, etc).
+topic names above are relative (`/red/ibvs/target_point`, etc).
 
-The tag pose convention is **body FLU**: `x` forward, `y` left, `z` up. So a
-tag on the floor 2 m below reads `z = -2`.
+### The vision module interface
+
+The controller never knows *what* is being tracked — it centers a point in
+the camera image. Any node that publishes
+`ibvs/target_point` (`geometry_msgs/PointStamped`) is a valid vision module:
+
+| Field | Meaning |
+|---|---|
+| `point.x` | normalized horizontal offset from the image center: `(u − cx)/fx`, positive **right** |
+| `point.y` | normalized vertical offset: `(v − cy)/fy`, positive **down** |
+| `point.z` | distance to the target along the optical axis [m], **`0.0` if unknown** |
+
+Rules:
+
+- **Publish only while the target is detected.** Fresh messages are what
+  flips the state to `TAG_IN_SIGHT` (and keeps `ALIGN` alive); silence for
+  `tag_timeout` means the target is gone.
+- With `point.z = 0` the controller *only centers the point laterally* and
+  holds altitude (lateral gains are scaled by `depth_guess`). Provide a real
+  distance and it will also regulate the vertical standoff (`target_z`).
+- The camera is assumed rigidly mounted looking straight **down**, with
+  image **right = body forward** (the kopterworx `down_facing_camera`
+  mount). A point at image (+x, +y) is (forward, right) of the vehicle.
 
 ### The AR-tag simulation setup (`ar_tag` branch)
 
@@ -127,8 +150,8 @@ tag on the floor 2 m below reads `z = -2`.
 | Tag model | `models/ar_tag/` — 20×20 cm ArUco marker (`DICT_4X4_50`, id 0) on a 30×30 cm white plate (5 cm quiet zone), spawned flat on the floor at the **world origin** by `ibvs_perching.launch` |
 | Camera | kopterworx down-facing RGB camera, 640×480 @ 30 fps, 80° HFOV, on `camera/color/image_raw` + `camera_info`; detection throttled to 15 Hz |
 | Camera mount | `urdf/kopterworx_downcam.urdf.xacro` — a copy of the stock kopterworx xacro with `down_facing_camera` moved to `xyz="0 0 -0.05"` (the stock mount hangs 0.3 m below / 0.2 m left, which would touch the tag at the target altitude and push it out of frame during descent) |
-| Detector | `scripts/aruco_detector.py` — see below |
-| Mission profile | `ibvs/takeoff` climbs to **2 m** (`takeoff_height`), holds; when `ibvs/state` shows **`TAG_IN_SIGHT`**, `ibvs/start` centers the tag in the camera and descends to the standoff above the tag (`target_z`, negative = tag below) |
+| Vision module | `scripts/aruco_detector.py` — publishes `ibvs/target_point`, see the interface above |
+| Mission profile | `ibvs/takeoff` climbs to **2 m** (`takeoff_height`), holds; when `ibvs/state` shows **`TAG_IN_SIGHT`**, `ibvs/start` centers the point in the camera and (because ArUco provides depth) descends to the standoff above the tag (`target_z`, negative = tag below) |
 | Spawn point | UAV starts at `(1, 0)`, 1 m from the tag, so the alignment maneuver is visible |
 | Signals | `config/plotjuggler_ibvs.xml` — PlotJuggler layout with the commanded body rates, thrust/climb-rate, tag error and altitude (pre-typed in the `visualization` window) |
 
@@ -259,7 +282,7 @@ Tag well above the standoff → thrust > 0.5 → climb toward it. At the standof
 | Interface | Name | Type | Notes |
 |---|---|---|---|
 | sub | `mavros/state` | `mavros_msgs/State` | armed flag + flight mode |
-| sub | `ibvs/tag_pose` | `geometry_msgs/PoseStamped` | tag position, body FLU |
+| sub | `ibvs/target_point` | `geometry_msgs/PointStamped` | the vision-module interface (see §3) |
 | sub | `mavros/local_position/odom` | `nav_msgs/Odometry` | attitude + body velocity for the cascade |
 | pub | `mavros/setpoint_raw/attitude` | `mavros_msgs/AttitudeTarget` | at `control_rate` |
 | pub | `ibvs/state` | `std_msgs/String` | latched, on transitions |
@@ -274,11 +297,12 @@ Parameters (all private, loaded from
 | `climb_thrust` | `0.6` | climb command during `CLIMB` (**must be > 0.5 to take off**) |
 | `thrust_min` / `thrust_max` | `0.35` / `0.7` | clamp on the Z command |
 | `takeoff_height` | `2.0` | `CLIMB` ends when odometry z reaches this [m] |
-| `target_z` | `-0.3` | desired tag height above vehicle (standoff) [m]; **negative = tag below** (floor tag: hover 0.3 m above it) |
-| `target_x` / `target_y` | `0.0` | desired lateral tag offset [m] |
-| `pid_xy/kp` | `0.15` | desired tilt per meter of tag error [rad/m] |
-| `pid_xy/ki` | `0.0` | integral gain (0 = off) |
-| `pid_xy/kd` | `0.0` | derivative gain; acts on body velocity (0 = off, `0.25` flight-tested) |
+| `target_z` | `-0.5` | desired target height above vehicle (standoff) [m]; **negative = target below**. Z only moves when the vision module provides depth |
+| `depth_guess` | `2.0` | assumed target distance when `point.z = 0` [m]; scales lateral gains only |
+| `target_x` / `target_y` | `0.0` | desired lateral offset [m] |
+| `pid_xy/kp` | `0.1` | desired tilt per meter of lateral error [rad/m] |
+| `pid_xy/ki` | `0.0` | integral gain (0 = off; a small value removes the trim-bias droop) |
+| `pid_xy/kd` | `0.15` | derivative gain; acts on body velocity — needed so the descent doesn't outrun the shrinking FOV (flight-tested) |
 | `pid_xy/i_max` | `0.05` | anti-windup clamp on integral contribution [rad] |
 | `pid_z/kp` | `0.2` | climb-rate delta per meter of tag-height error |
 | `pid_z/ki` / `pid_z/kd` | `0.0` | integral / derivative gains (0 = off) |
@@ -294,58 +318,44 @@ Parameters (all private, loaded from
 | `align_tolerance` | `0.15` | X-Y error norm considered aligned [m] |
 | `align_dwell_time` | `2.0` | time within tolerance before `ALIGNED` [s] |
 | `align_hysteresis` | `1.5` | tolerance multiplier to leave `ALIGNED` |
-| `tag_timeout` | `1.0` | detection staleness threshold [s] |
+| `tag_timeout` | `0.5` | detection staleness threshold [s] |
 
-### `aruco_detector.py` (default tag source)
+### `aruco_detector.py` (the shipped vision module)
 
-Real detection: subscribes to the down-facing camera, detects the ArUco
-marker with `cv2.aruco`, estimates its metric pose from the camera
-intrinsics (`camera_info`) and the known marker size, transforms it into
-body FLU using the fixed camera mount, and publishes `ibvs/tag_pose` —
-the identical interface the mock used, so the controller is unchanged.
+Detects the ArUco marker with `cv2.aruco` and publishes its **image-plane
+center** on `ibvs/target_point` (see the interface in §3). `point.x/y` come
+straight from the marker's pixel center and the intrinsics (exact even if
+`marker_length` is miscalibrated); `point.z` is the depth estimated from the
+known marker size.
 
 | Interface | Name | Type |
 |---|---|---|
 | sub | `camera/color/image_raw` | `sensor_msgs/Image` |
 | sub | `camera/color/camera_info` | `sensor_msgs/CameraInfo` |
-| pub | `ibvs/tag_pose` | `geometry_msgs/PoseStamped` (body FLU) |
+| pub | `ibvs/target_point` | `geometry_msgs/PointStamped` (vision interface) |
 | pub | `ibvs/debug_image` | `sensor_msgs/Image` (detections drawn; only rendered when subscribed — `rqt_image_view` is pre-typed in the visualization window) |
 
 | Param | Default | Meaning |
 |---|---|---|
 | `~marker_id` | `0` | ArUco id to accept |
-| `~marker_length` | `0.20` | marker side [m] — must match the printed/simulated size or distances scale wrong |
+| `~marker_length` | `0.20` | marker side [m] — only affects the `point.z` depth hint |
 | `~process_rate` | `15.0` | detection rate [Hz]; camera frames arriving faster are skipped |
 | `~dictionary` | `DICT_4X4_50` | any `cv2.aruco.DICT_*` name |
-| `~camera_xyz` | `[0, 0, -0.05]` | camera mount position on the body (must match the URDF `camera_joint`) |
-| `~camera_rpy` | `[-1.570796, 1.570796, 0]` | camera mount orientation (URDF rpy) |
-
-With the down-facing mount the optical→body transform reduces to
-`tag_body = (t_opt.x, −t_opt.y, −t_opt.z) + camera_xyz`. No tilt
-compensation is applied (fine below ~10° of tilt).
 
 ### `mock_ar_tag_publisher.py` (`use_mock_tag:=true`)
 
-Fakes an AR-tag detector. Reads real odometry, subtracts it from a fixed tag
-position in the local/world frame, rotates into body FLU (yaw only), and
-publishes the result. Because it reacts to real vehicle motion, the loop
-genuinely closes in simulation: as the controller flies toward the tag, the
-"detection" error shrinks.
-
-| Interface | Name | Type |
-|---|---|---|
-| sub | `mavros/local_position/odom` (param `~odom_topic`) | `nav_msgs/Odometry` |
-| pub | `ibvs/tag_pose` | `geometry_msgs/PoseStamped` |
+Vision module without a camera: computes what a down-facing camera *would*
+see for a target at a fixed world position, from real odometry, and
+publishes the same `ibvs/target_point` interface (including the depth). It
+only publishes while the target is below the vehicle, so `TAG_IN_SIGHT`
+behaves realistically.
 
 | Param | Default | Meaning |
 |---|---|---|
-| `~publish_rate` | `10.0` | detection rate [Hz] |
-| `~tag_world_position` | `[-2.0, 0.0, 1.5]` | tag position, local frame |
+| `~publish_rate` | `15.0` | detection rate [Hz] |
+| `~tag_world_position` | `[0.0, 0.0, 0.02]` | target position, local frame |
 | `~odom_topic` | `mavros/local_position/odom` | odometry source |
-
-With the kopterworx default spawn `(0, 0, 0.5)`, the first detection is
-exactly the canonical demo scenario: **tag at `(-2, 0, 1)` relative, goal
-`(0, 0, 1)`** (aligned in X-Y, 1 m below the tag).
+| `~min_depth` | `0.1` | minimum distance below the vehicle to count as "in view" [m] |
 
 ## 7. Building
 

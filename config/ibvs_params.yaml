@@ -20,10 +20,14 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] CLIMB ends when odometry z reaches this
 
-# Desired tag height ABOVE the vehicle. The AR tag lies on the floor, so it
-# is BELOW the vehicle: negative value. -0.3 => hover 0.3 m above the tag
-# (world z ~0.3 with the tag plate on the ground at z~0.02).
+# Desired target height ABOVE the vehicle. The AR tag lies on the floor, so
+# it is BELOW the vehicle: negative value. -0.5 => hover 0.5 m above the tag
+# (world z ~0.5 with the tag plate on the ground at z~0.02). Vertical motion
+# only happens when the vision module provides a depth (point.z > 0).
 target_z: -0.5
+depth_guess: 2.0              # [m] assumed target distance when the vision
+                              # module sends no depth (point.z = 0); only
+                              # scales X-Y gains, never causes Z motion
 
 # ---------------------------------------------------------------------------
 # X-Y axis -- closed-loop IBVS cascade on the tag position error

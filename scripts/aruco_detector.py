@@ -1,38 +1,35 @@
 #!/usr/bin/env python
 
 """
-Real ArUco tag detector for IBVS perching.
+ArUco vision module for the IBVS controller.
 
-Subscribes to the down-facing camera, detects a single ArUco marker
-(DICT_4X4_50 id 0 by default, 30 cm side), estimates its metric pose from
-the camera intrinsics, transforms it into the body FLU frame and publishes
-it on ibvs/tag_pose -- the exact same interface the mock publisher used, so
-the controller needs no changes.
+This node is ONE possible vision module: it detects an ArUco marker and
+publishes the point the controller should center in the camera image.
+Replace it with any other detector that speaks the same interface and the
+controller works unchanged.
 
-Frames:
-    optical (OpenCV/aruco): x right in image, y down in image, z out of lens
-    camera mount (URDF)   : camera_box oriented by ~camera_rpy, then the
-                            fixed camera_help joint rpy=(-1.5708, 0, -1.5708)
-                            turns camera_box into the optical frame
-    body FLU              : x forward, y left, z up
+VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
+    point.x  normalized horizontal offset from the image center,
+             (u - cx) / fx, positive RIGHT in the image
+    point.y  normalized vertical offset from the image center,
+             (v - cy) / fy, positive DOWN in the image
+    point.z  distance to the target along the optical axis [m],
+             or 0.0 if unknown (the controller then only centers X-Y
+             and holds altitude)
 
-    tag_body = R_body_optical * tvec + camera_xyz
+    Publish ONLY while the target is actually detected -- the controller
+    treats fresh messages as "target in sight" (TAG_IN_SIGHT state).
 
-With the down-facing mount (rpy = -1.5708, 1.5708, 0) this works out to
-tag_body = (t_opt.x, -t_opt.y, -t_opt.z) + mount offset, i.e. a tag below
-the vehicle has negative body z, as the controller expects (target_z < 0).
-
-No attitude compensation is applied: at the tilt angles this controller
-commands (max_tilt ~8.5 deg) the small-angle error is well inside the
-alignment tolerance.
+Here the marker's pixel center gives point.x/point.y directly (exact even
+if marker_length is miscalibrated), and the pose estimate from the known
+marker size provides the optional depth hint in point.z.
 """
 
 import numpy as np
 
 import rospy
-import tf.transformations as tft
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import CameraInfo, Image
 
 import cv2
@@ -52,21 +49,11 @@ class ArucoDetector:
         self.detector_params = aruco.DetectorParameters_create()
         self.last_processed = rospy.Time(0)
 
-        # camera mount on the body, same values as the URDF camera_joint
-        camera_xyz = rospy.get_param('~camera_xyz', [0.0, 0.0, -0.05])
-        camera_rpy = rospy.get_param('~camera_rpy', [-1.570796, 1.570796, 0.0])
-
-        # body <- camera_box <- optical (camera_help joint in the URDF)
-        r_body_box = tft.euler_matrix(*camera_rpy)[:3, :3]
-        r_box_optical = tft.euler_matrix(-1.570796, 0.0, -1.570796)[:3, :3]
-        self.r_body_optical = np.dot(r_body_box, r_box_optical)
-        self.t_body_camera = np.array(camera_xyz)
-
         self.camera_matrix = None
         self.dist_coeffs = None
         self.bridge = CvBridge()
 
-        self.pose_pub = rospy.Publisher('ibvs/tag_pose', PoseStamped, queue_size=1)
+        self.point_pub = rospy.Publisher('ibvs/target_point', PointStamped, queue_size=1)
         self.debug_pub = rospy.Publisher('ibvs/debug_image', Image, queue_size=1)
 
         rospy.Subscriber('camera/color/camera_info', CameraInfo,
@@ -75,8 +62,8 @@ class ArucoDetector:
                          self.image_callback, queue_size=1, buff_size=2 ** 22)
 
         rospy.loginfo(
-            "aruco_detector: looking for %s id %d (%.2f m), camera mount xyz=%s",
-            dictionary_name, self.marker_id, self.marker_length, camera_xyz)
+            "aruco_detector: vision module for %s id %d (%.2f m), %g Hz",
+            dictionary_name, self.marker_id, self.marker_length, self.process_rate)
 
     def camera_info_callback(self, msg):
         if self.camera_matrix is None:
@@ -101,21 +88,12 @@ class ArucoDetector:
         corners, ids, _ = aruco.detectMarkers(
             gray, self.dictionary, parameters=self.detector_params)
 
-        tvec_optical = None
-        rmat_optical = None
         if ids is not None:
             for marker_corners, marker_id in zip(corners, ids.flatten()):
                 if marker_id != self.marker_id:
                     continue
-                rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
-                    [marker_corners], self.marker_length,
-                    self.camera_matrix, self.dist_coeffs)
-                tvec_optical = tvecs[0][0]
-                rmat_optical, _ = cv2.Rodrigues(rvecs[0][0])
+                self.publish_point(msg.header, marker_corners)
                 break
-
-        if tvec_optical is not None:
-            self.publish_pose(msg.header.stamp, tvec_optical, rmat_optical)
 
         if self.debug_pub.get_num_connections() > 0:
             debug = frame.copy()
@@ -123,24 +101,28 @@ class ArucoDetector:
                 aruco.drawDetectedMarkers(debug, corners, ids)
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
 
-    def publish_pose(self, stamp, tvec_optical, rmat_optical):
-        position_body = np.dot(self.r_body_optical, tvec_optical) + self.t_body_camera
+    def publish_point(self, header, marker_corners):
+        # normalized image coordinates of the marker center
+        u, v = marker_corners[0].mean(axis=0)
+        fx = self.camera_matrix[0, 0]
+        fy = self.camera_matrix[1, 1]
+        cx = self.camera_matrix[0, 2]
+        cy = self.camera_matrix[1, 2]
 
-        rmat_body = np.eye(4)
-        rmat_body[:3, :3] = np.dot(self.r_body_optical, rmat_optical)
-        quat = tft.quaternion_from_matrix(rmat_body)
+        # depth hint from the known marker size (optional extra: a vision
+        # module that cannot estimate distance publishes z = 0 instead)
+        _, tvecs, _ = aruco.estimatePoseSingleMarkers(
+            [marker_corners], self.marker_length,
+            self.camera_matrix, self.dist_coeffs)
+        depth = float(tvecs[0][0][2])
 
-        msg = PoseStamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = 'base_link'
-        msg.pose.position.x = position_body[0]
-        msg.pose.position.y = position_body[1]
-        msg.pose.position.z = position_body[2]
-        msg.pose.orientation.x = quat[0]
-        msg.pose.orientation.y = quat[1]
-        msg.pose.orientation.z = quat[2]
-        msg.pose.orientation.w = quat[3]
-        self.pose_pub.publish(msg)
+        msg = PointStamped()
+        msg.header.stamp = header.stamp
+        msg.header.frame_id = header.frame_id
+        msg.point.x = (u - cx) / fx
+        msg.point.y = (v - cy) / fy
+        msg.point.z = depth
+        self.point_pub.publish(msg)
 
 
 if __name__ == '__main__':

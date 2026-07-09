@@ -58,6 +58,6 @@ windows:
       panes:
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/tag_pose
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/local_position/odom

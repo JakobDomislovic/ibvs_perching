@@ -1,12 +1,33 @@
 #!/usr/bin/env python
 
 """
-Image-Based Visual Servoing controller for AR-tag perching.
+Image-Based Visual Servoing controller.
 
 Publishes DIRECTLY to mavros/setpoint_raw/attitude (body rates + thrust),
 bypassing the uav_ros_stack tracker/controller entirely. Arming and mode
-switching (GUIDED_NOGPS) are done by the startup script, not this node --
-this node only ever streams AttitudeTarget setpoints.
+switching (GUIDED_NOGPS) are done by the ibvs/takeoff service -- this node
+only ever streams AttitudeTarget setpoints.
+
+VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
+    The controller is agnostic to WHAT is being tracked. Any vision module
+    (ArUco today, anything else tomorrow) publishes the point it wants
+    centered in the camera image:
+        point.x  normalized horizontal offset from the image center,
+                 (u - cx) / fx, positive RIGHT in the image
+        point.y  normalized vertical offset from the image center,
+                 (v - cy) / fy, positive DOWN in the image
+        point.z  distance to the target along the optical axis [m],
+                 or 0.0 if unknown
+    Publishing on this topic at all means "target in sight": the state
+    machine shows TAG_IN_SIGHT and ibvs/start will engage. The controller
+    steers so the point goes to the image center (target_x/target_y offsets
+    are available). Vertical motion toward the target happens ONLY when
+    point.z carries a real distance; with z=0 the controller centers the
+    point while holding altitude.
+
+    The camera is assumed rigidly mounted looking straight down with image
+    RIGHT = body FORWARD (the kopterworx down_facing_camera mount): a point
+    seen at (+x, +y) in the image lies (forward, right) of the vehicle.
 
 IMPORTANT -- how ArduPilot interprets the "thrust" field:
     In GUIDED / GUIDED_NOGPS mode ArduPilot treats AttitudeTarget.thrust
@@ -83,7 +104,7 @@ import math
 
 import rospy
 import tf.transformations as tft
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 from mavros_msgs.msg import AttitudeTarget, State
 from mavros_msgs.srv import CommandBool, SetMode
@@ -150,8 +171,11 @@ class IbvsController:
         self.climb_thrust = rospy.get_param('~climb_thrust', 0.6)
         self.thrust_min = rospy.get_param('~thrust_min', 0.35)
         self.thrust_max = rospy.get_param('~thrust_max', 0.7)
-        self.target_z = rospy.get_param('~target_z', 1.0)
+        self.target_z = rospy.get_param('~target_z', -0.5)
         self.takeoff_height = rospy.get_param('~takeoff_height', 2.0)
+        # assumed distance to the target when the vision module gives no
+        # depth (point.z = 0); only scales the X-Y gains, never used for Z
+        self.depth_guess = rospy.get_param('~depth_guess', 2.0)
         # descend only while laterally centered on the tag: descending
         # off-center shrinks the camera FOV faster than the X-Y loop
         # converges and the tag falls out of frame (flight-tested)
@@ -207,7 +231,12 @@ class IbvsController:
 
         self.armed = False
         self.mode = ''
-        self.last_tag = None
+        # target reconstructed from the vision module's image point, in the
+        # body FLU frame: t_x forward, t_y left; t_z is None without a depth
+        # hint (then only lateral centering runs, no climb/descent)
+        self.t_x = None
+        self.t_y = None
+        self.t_z = None
         self.last_tag_time = None
         self.last_odom = None
         # (x, y) in the local frame that HOVER/TAG_LOST hold on to
@@ -221,7 +250,7 @@ class IbvsController:
         self.state_pub.publish(String(data=self.state))
 
         rospy.Subscriber('mavros/state', State, self.mavros_state_callback, queue_size=1)
-        rospy.Subscriber('ibvs/tag_pose', PoseStamped, self.tag_callback, queue_size=1)
+        rospy.Subscriber('ibvs/target_point', PointStamped, self.target_callback, queue_size=1)
         rospy.Subscriber('mavros/local_position/odom', Odometry,
                          self.odom_callback, queue_size=1)
 
@@ -283,8 +312,18 @@ class IbvsController:
         self.armed = msg.armed
         self.mode = msg.mode
 
-    def tag_callback(self, msg):
-        self.last_tag = msg
+    def target_callback(self, msg):
+        """Vision-module point -> pseudo target position in body FLU.
+
+        Down camera with image right = body forward:
+            direction_body = (point.x, -point.y, -1) * depth
+        Without a depth hint the lateral error is scaled by depth_guess --
+        the loop still centers the point, gains just aren't depth-adapted.
+        """
+        depth = msg.point.z if msg.point.z > 0.0 else self.depth_guess
+        self.t_x = depth * msg.point.x
+        self.t_y = -depth * msg.point.y
+        self.t_z = -msg.point.z if msg.point.z > 0.0 else None
         self.last_tag_time = rospy.Time.now()
 
     def odom_callback(self, msg):
@@ -376,21 +415,22 @@ class IbvsController:
         if self.state == CLIMB:
             return self.climb_thrust
 
-        if self.state in (ALIGN, ALIGNED) and self.last_tag is not None:
-            # tag z is the tag's height above the vehicle (body FLU);
-            # climb while it is still larger than the desired standoff.
-            z_err = self.last_tag.pose.position.z - self.target_z
+        # vertical motion toward the target requires a depth hint from the
+        # vision module (point.z > 0); a bare image point only centers X-Y
+        if self.state in (ALIGN, ALIGNED) and self.t_z is not None:
+            # t_z is the target's height above the vehicle (body FLU);
+            # negative for a target below. Regulate toward the standoff.
+            z_err = self.t_z - self.target_z
             z_err_dot = 0.0
             if self.last_odom is not None:
-                # stationary tag: d(tag_z)/dt = -climb velocity
+                # stationary target: d(t_z)/dt = -climb velocity
                 z_err_dot = -self.last_odom.twist.twist.linear.z
             delta = self.pid_z.update(z_err, z_err_dot, self.dt)
 
             # landing funnel: never descend while laterally off-center,
-            # otherwise the tag exits the shrinking camera FOV
-            lateral_error = (
-                (self.target_x - self.last_tag.pose.position.x) ** 2 +
-                (self.target_y - self.last_tag.pose.position.y) ** 2) ** 0.5
+            # otherwise the target exits the shrinking camera FOV
+            lateral_error = ((self.target_x - self.t_x) ** 2 +
+                             (self.target_y - self.t_y) ** 2) ** 0.5
             if delta < 0.0 and lateral_error > self.descend_xy_gate:
                 delta = 0.0
 
@@ -435,10 +475,10 @@ class IbvsController:
             desired_roll = clamp(-self.kp_hover * err_by + self.kv_hover * vel.y,
                                  -self.max_tilt, self.max_tilt)
 
-        if self.state in (ALIGN, ALIGNED) and self.last_tag is not None:
-            # tag position error is already in body FLU
-            err_x = self.target_x - self.last_tag.pose.position.x
-            err_y = self.target_y - self.last_tag.pose.position.y
+        if self.state in (ALIGN, ALIGNED) and self.t_x is not None:
+            # target position error in body FLU (from the image point)
+            err_x = self.target_x - self.t_x
+            err_y = self.target_y - self.t_y
             error_norm = (err_x ** 2 + err_y ** 2) ** 0.5
 
             if self.state == ALIGN:

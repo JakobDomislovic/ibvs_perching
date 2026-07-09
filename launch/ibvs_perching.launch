@@ -15,9 +15,13 @@
   <arg name="namespace" default="$(env UAV_NAMESPACE)"/>
   <arg name="config" default="$(find ibvs_perching)/config/ibvs_params.yaml"/>
 
-  <!-- Real ArUco detection (default) vs the odometry-based mock -->
+  <!-- Real ArUco detection (default) vs the odometry-based mock.
+       Both are "vision modules": they publish ibvs/target_point
+       (PointStamped: x,y = normalized offset from the image center,
+       z = distance if known else 0). Swap in your own detector by
+       publishing the same topic. -->
   <arg name="use_mock_tag" default="false"/>
-  <arg name="tag_world_position" default="[-1.0, 0.0, 1.5]"/>
+  <arg name="tag_world_position" default="[0.0, 0.0, 0.02]"/>
   <arg name="odom_topic" default="mavros/local_position/odom"/>
 
   <!-- AR tag model spawned on the floor at the world origin -->
@@ -31,16 +35,13 @@
       <rosparam file="$(arg config)" command="load"/>
     </node>
 
-    <!-- real detector: down-facing camera -> tag pose in body FLU -->
+    <!-- vision module: down-facing camera -> point to center (ibvs/target_point) -->
     <node unless="$(arg use_mock_tag)"
           pkg="ibvs_perching" type="aruco_detector.py" name="aruco_detector" output="screen">
       <param name="marker_id" value="0"/>
       <param name="marker_length" value="0.20"/>
       <param name="process_rate" value="15.0"/>
       <param name="dictionary" value="DICT_4X4_50"/>
-      <!-- must match the camera_joint of kopterworx_downcam.urdf.xacro -->
-      <rosparam param="camera_xyz">[0.0, 0.0, -0.05]</rosparam>
-      <rosparam param="camera_rpy">[-1.570796, 1.570796, 0.0]</rosparam>
     </node>
 
     <node if="$(arg use_mock_tag)"

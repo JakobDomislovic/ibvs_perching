@@ -30,19 +30,19 @@
       </DockArea>
      </DockSplitter>
      <DockSplitter count="3" orientation="-" sizes="0.33;0.33;0.34">
-      <DockArea name="tag error xy (body FLU)">
+      <DockArea name="image point offset (x right, y down)">
        <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
-        <range bottom="-2" right="60" top="2" left="0"/>
+        <range bottom="-1" right="60" top="1" left="0"/>
         <limitY/>
-        <curve color="#1f77b4" name="/red/ibvs/tag_pose/pose/position/x"/>
-        <curve color="#d62728" name="/red/ibvs/tag_pose/pose/position/y"/>
+        <curve color="#1f77b4" name="/red/ibvs/target_point/point/x"/>
+        <curve color="#d62728" name="/red/ibvs/target_point/point/y"/>
        </plot>
       </DockArea>
-      <DockArea name="tag z (below vehicle = negative)">
+      <DockArea name="target distance (0 = unknown)">
        <plot mode="TimeSeries" flip_x="false" flip_y="false" style="Lines">
-        <range bottom="-2.5" right="60" top="0" left="0"/>
+        <range bottom="0" right="60" top="2.5" left="0"/>
         <limitY/>
-        <curve color="#2ca02c" name="/red/ibvs/tag_pose/pose/position/z"/>
+        <curve color="#2ca02c" name="/red/ibvs/target_point/point/z"/>
        </plot>
       </DockArea>
       <DockArea name="body velocity">
@@ -80,7 +80,7 @@
    <max_array_size value="100"/>
    <boolean_strings_to_number value="true"/>
    <remove_suffix_from_strings value="true"/>
-   <selected_topics value="/red/mavros/setpoint_raw/attitude;/red/ibvs/tag_pose;/red/mavros/local_position/odom"/>
+   <selected_topics value="/red/mavros/setpoint_raw/attitude;/red/ibvs/target_point;/red/mavros/local_position/odom"/>
   </plugin>
   <plugin ID="UDP Server"/>
   <plugin ID="WebSocket Server"/>
