@@ -1,205 +1,206 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
     <meta charset="utf-8">
-    <meta name="description" content="ibvs_perching — how to run the perching simulation: startup, tmux session tour, missions, troubleshooting.">
+    <meta name="description" content="IBVS Perching — how to run the perching simulation: startup, tmux session tour, missions, troubleshooting.">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Running the simulation — ibvs_perching</title>
+    <title>Running the simulation — IBVS Perching</title>
 
-    <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
-    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/js/all.min.js"></script>
 </head>
 
 <body>
 
-    <nav class="doc-nav">
-        <div class="container is-max-desktop">
-            <a href="index.html"><i class="fas fa-home"></i> Home</a>
-            <a href="simulation.html" class="is-active">Running the simulation</a>
-            <a href="joystick.html">Keyboard joystick</a>
-            <a href="controller.html">The controller</a>
-            <a href="code.html">Code walkthrough</a>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a class="nav-brand" href="index.html"><i class="fas fa-crosshairs"></i> IBVS Perching</a>
+            <div class="nav-links">
+                <a href="index.html">Home</a>
+                <a href="simulation.html" class="is-active">Simulation</a>
+                <a href="joystick.html">Joystick</a>
+                <a href="controller.html">Controller</a>
+                <a href="code.html">Code</a>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i> GitHub</a>
+            </div>
         </div>
     </nav>
 
-    <section class="hero lab-hero">
-        <div class="hero-body" style="padding: 2.5rem 1.5rem;">
-            <div class="container is-max-desktop has-text-centered">
-                <h1 class="title is-2">Running the simulation</h1>
-                <p class="subtitle is-5">One command → Gazebo, ArduPilot SITL, mavros, detector, controller</p>
-            </div>
+    <header class="hero">
+        <div class="hero-inner compact">
+            <span class="hero-eyebrow">Docs &middot; Getting started</span>
+            <h1 class="hero-title" style="font-size: clamp(2rem, 5vw, 2.9rem);">Running the <span class="accent">simulation</span></h1>
+            <p class="hero-sub">One command &rarr; Gazebo, ArduPilot SITL, mavros, detector, controller.</p>
         </div>
-    </section>
+    </header>
 
     <!-- Prerequisites -->
     <section class="section">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">1&nbsp;·&nbsp;Prerequisites</h2>
-            <div class="content">
-                <p>The simulation is built on the LARICS
-                    <a href="https://github.com/larics/uav_ros_simulation" target="_blank">uav_ros_simulation</a>
-                    stack (ROS Noetic, Gazebo, ArduPilot SITL, <code>ardupilot_gazebo</code>). With that workspace in
-                    place, build this package once:</p>
-                <pre><code>cd ~/uav_ws
+        <div class="container narrow prose">
+            <span class="overline">Step 1</span>
+            <h2 class="section-title">Prerequisites</h2>
+            <p>The simulation is built on the LARICS
+                <a href="https://github.com/larics/uav_ros_simulation" target="_blank">uav_ros_simulation</a> stack
+                (ROS Noetic, Gazebo, ArduPilot SITL, <code>ardupilot_gazebo</code>). With that workspace in place,
+                build this package once:</p>
+            <pre><code>cd ~/uav_ws
 catkin build ibvs_perching
 source devel/setup.bash</code></pre>
-                <p>Runtime dependencies are standard ROS packages: <code>rospy</code>, <code>mavros</code>,
-                    <code>cv_bridge</code> (with OpenCV's ArUco module), <code>tf</code>, and
-                    <code>tmuxinator</code> for the startup session.</p>
-            </div>
+            <p>Runtime dependencies are standard ROS packages: <code>rospy</code>, <code>mavros</code>,
+                <code>cv_bridge</code> (with OpenCV's ArUco module), <code>tf</code>, and <code>tmuxinator</code> for
+                the startup session.</p>
         </div>
     </section>
 
     <!-- Start -->
-    <section class="section hero is-light">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">2&nbsp;·&nbsp;Start everything</h2>
-            <div class="content">
-                <pre><code>cd ~/uav_ws/src/ibvs_perching/startup/sim_ibvs
+    <section class="section alt">
+        <div class="container narrow prose">
+            <span class="overline">Step 2</span>
+            <h2 class="section-title">Start everything</h2>
+            <pre><code>cd ~/uav_ws/src/ibvs_perching/startup/sim_ibvs
 ./start.sh</code></pre>
-                <p>
-                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/startup/sim_ibvs/start.sh"
-                        target="_blank"><code>start.sh</code></a> links
-                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/startup/sim_ibvs/session.yml"
-                        target="_blank"><code>session.yml</code></a> to <code>.tmuxinator.yml</code> and starts a tmux
-                    session named <code>ibvs_perching_sim</code>. Every pane exports
-                    <code>UAV_NAMESPACE=red</code>, so all topics live under <code>/red/…</code>. Give ArduPilot SITL
-                    ~30 seconds to boot before doing anything — its EKF needs a moment before it accepts arming.
-                </p>
-            </div>
+            <p>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/startup/sim_ibvs/start.sh"
+                    target="_blank"><code>start.sh</code></a> links
+                <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/startup/sim_ibvs/session.yml"
+                    target="_blank"><code>session.yml</code></a> to <code>.tmuxinator.yml</code> and starts a tmux
+                session named <code>ibvs_perching_sim</code>. Every pane exports <code>UAV_NAMESPACE=red</code>, so
+                all topics live under <code>/red/…</code>. Give ArduPilot SITL ~30 seconds to boot before doing
+                anything — its EKF needs a moment before it accepts arming.
+            </p>
 
-            <div class="callout is-danger">
-                <p class="callout-title"><i class="fas fa-triangle-exclamation"></i>&nbsp; GUID_OPTIONS must be 0</p>
-                <p>The startup sets the ArduPilot parameter <code>GUID_OPTIONS</code> to <code>0</code> before
-                    launching the controller. The LARICS kopterworx parameter file ships with
-                    <code>GUID_OPTIONS = 8</code>, which makes ArduPilot treat the attitude-setpoint thrust field as
-                    <em>raw motor thrust</em> instead of a <em>climb rate</em> — with that setting this controller
-                    commands a constant full climb and the vehicle <strong>flies away</strong>. The
-                    <a href="controller.html#thrust">controller page</a> explains the thrust semantics in detail.</p>
+            <div class="callout danger">
+                <div class="callout-icon"><i class="fas fa-triangle-exclamation"></i></div>
+                <div>
+                    <p class="callout-title">GUID_OPTIONS must be 0</p>
+                    <p>The startup sets the ArduPilot parameter <code>GUID_OPTIONS</code> to <code>0</code> before
+                        launching the controller. The LARICS kopterworx parameter file ships with
+                        <code>GUID_OPTIONS&nbsp;=&nbsp;8</code>, which makes ArduPilot treat the attitude-setpoint
+                        thrust field as <em>raw motor thrust</em> instead of a <em>climb rate</em> — with that setting
+                        this controller commands a constant full climb and the vehicle <strong>flies away</strong>.
+                        The <a href="controller.html#thrust" class="prose">controller page</a> explains the thrust
+                        semantics in detail.</p>
+                </div>
             </div>
         </div>
     </section>
 
     <!-- Session tour -->
     <section class="section">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">3&nbsp;·&nbsp;A tour of the tmux session</h2>
-            <div class="content">
-                <p>Move between windows with <span class="kbd is-small">Ctrl</span>+<span class="kbd is-small">b</span>
-                    then <span class="kbd is-small">w</span> (window list). Lines marked <em>press ↑</em> are pre-typed
-                    into the pane's shell history — select the pane, press the up arrow, and hit Enter.</p>
+        <div class="container">
+            <span class="overline">Step 3</span>
+            <h2 class="section-title">A tour of the tmux session</h2>
+            <div class="prose narrow" style="margin: 0;">
+                <p>Move between windows with <span class="kbd sm">Ctrl</span>+<span class="kbd sm">B</span> then
+                    <span class="kbd sm">W</span> (window list). Lines marked <em>press ↑</em> are pre-typed into the
+                    pane's shell history — select the pane, press the up arrow, and hit Enter.</p>
             </div>
 
-            <table class="table doc-table is-fullwidth">
-                <thead>
-                    <tr>
-                        <th style="width: 15%;">Window</th>
-                        <th>What runs in it</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>roscore</strong></td>
-                        <td><code>roscore</code>, ArduPilot SITL (<code>sim_vehicle.launch</code>, its console lives in
-                            the hidden <code>ardupilot1</code> window), and mavros with
-                            <code>use_sim_time</code>. This window just needs to be alive — you rarely look at it.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>gazebo</strong></td>
-                        <td>Spawns the kopterworx quadrotor using the package's own
-                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/urdf/kopterworx_downcam.urdf.xacro"
-                                target="_blank">camera URDF</a> — the camera sits directly under the base looking
-                            straight down (the stock mount hangs 0.3&nbsp;m low and would touch the tag at the final
-                            approach height).</td>
-                    </tr>
-                    <tr>
-                        <td><strong>visualization</strong></td>
-                        <td>Pre-typed (press ↑): PlotJuggler with a
-                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/plotjuggler_ibvs.xml"
-                                target="_blank">ready-made layout</a> for the command signals, RViz, and
-                            <code>rqt_image_view</code> on <span class="topic-tag">ibvs/debug_image</span> — the
-                            detector's camera view with the detected marker drawn in. Open this one; it is the best
-                            way to watch the mission.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>ibvs</strong></td>
-                        <td>The heart of the session. Pane 1 sets <code>GUID_OPTIONS 0</code> and launches
-                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/launch/ibvs_perching.launch"
-                                target="_blank"><code>ibvs_perching.launch</code></a> (controller + ArUco detector +
-                            the tag model in Gazebo). Pane 2 has the
-                            <a href="joystick.html">keyboard joystick</a> pre-typed (press ↑). The remaining panes echo
-                            <span class="topic-tag">mavros/state</span> (mode + armed) and
-                            <span class="topic-tag">ibvs/state</span> (the controller's state machine), plus a
-                            pre-typed rosbag recorder.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>joystick</strong></td>
-                        <td>The RC→joy bridge (<code>rc_to_joy</code> from <code>uav_ros_general</code> — the same node
-                            the real vehicle runs) and an echo of <span class="topic-tag">joy</span>. When you fly with
-                            the keyboard you will see the stick values move here, exactly as they would with a real
-                            transmitter.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>status</strong></td>
-                        <td>Echoes of <span class="topic-tag">ibvs/target_point</span> (what the vision module sees),
-                            <span class="topic-tag">mavros/setpoint_raw/attitude</span> (what the controller commands),
-                            and odometry.</td>
-                    </tr>
-                </tbody>
-            </table>
+            <div class="tbl-wrap">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th style="width: 16%;">Window</th>
+                            <th>What runs in it</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>roscore</strong></td>
+                            <td><code>roscore</code>, ArduPilot SITL (<code>sim_vehicle.launch</code>, its console
+                                lives in the hidden <code>ardupilot1</code> window), and mavros with
+                                <code>use_sim_time</code>. This window just needs to be alive — you rarely look at
+                                it.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>gazebo</strong></td>
+                            <td>Spawns the kopterworx quadrotor using the package's own
+                                <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/urdf/kopterworx_downcam.urdf.xacro"
+                                    target="_blank" class="prose">camera URDF</a> — the camera sits directly under the
+                                base looking straight down (the stock mount hangs 0.3&nbsp;m low and would touch the
+                                tag at the final approach height).</td>
+                        </tr>
+                        <tr>
+                            <td><strong>visualization</strong></td>
+                            <td>Pre-typed (press ↑): PlotJuggler with a
+                                <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/plotjuggler_ibvs.xml"
+                                    target="_blank" class="prose">ready-made layout</a> for the command signals, RViz,
+                                and <code>rqt_image_view</code> on <span class="topic-tag">ibvs/debug_image</span> —
+                                the detector's camera view with the detected marker drawn in. Open this one; it is the
+                                best way to watch the mission.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ibvs</strong></td>
+                            <td>The heart of the session. Pane 1 sets <code>GUID_OPTIONS 0</code> and launches
+                                <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/launch/ibvs_perching.launch"
+                                    target="_blank" class="prose"><code>ibvs_perching.launch</code></a> (controller +
+                                ArUco detector + the tag model in Gazebo). Pane 2 has the
+                                <a href="joystick.html" class="prose">keyboard joystick</a> pre-typed (press ↑). The
+                                remaining panes echo <span class="topic-tag">mavros/state</span> (mode + armed) and
+                                <span class="topic-tag">ibvs/state</span> (the controller's state machine), plus a
+                                pre-typed rosbag recorder.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>joystick</strong></td>
+                            <td>The RC→joy bridge (<code>rc_to_joy</code> from <code>uav_ros_general</code> — the same
+                                node the real vehicle runs) and an echo of <span class="topic-tag">joy</span>. When
+                                you fly with the keyboard you will see the stick values move here, exactly as they
+                                would with a real transmitter.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>status</strong></td>
+                            <td>Echoes of <span class="topic-tag">ibvs/target_point</span> (what the vision module
+                                sees), <span class="topic-tag">mavros/setpoint_raw/attitude</span> (what the
+                                controller commands), and odometry.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </section>
 
     <!-- Missions -->
-    <section class="section hero is-light">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">4&nbsp;·&nbsp;Fly a mission</h2>
-            <div class="content">
+    <section class="section alt">
+        <div class="container">
+            <span class="overline">Step 4</span>
+            <h2 class="section-title">Fly a mission</h2>
+            <div class="prose narrow" style="margin: 0;">
                 <p>There are two ways to run the mission. The <strong>joystick mission</strong> is the main one — it
                     rehearses exactly what will happen in the real world. The <strong>service mission</strong> is a
                     fully autonomous fallback that needs no piloting at all.</p>
             </div>
 
-            <div class="columns">
-                <div class="column is-half">
-                    <div class="box is-static" style="height: 100%;">
-                        <p class="heading" style="color: #F5821F; font-weight: bold;"><i class="fas fa-gamepad"></i>
-                            &nbsp;A — JOYSTICK MISSION (the real-world rehearsal)</p>
-                        <div class="content" style="margin-top: 1rem;">
-                            <ol>
-                                <li>Go to the <strong>ibvs</strong> window, select the keyboard pane, press ↑ and Enter
-                                    to start <code>keyboard_rc.py</code>. Wait for
-                                    <em>“SYSID_MYGCS=1 — RC override enabled”</em>.</li>
-                                <li><span class="kbd is-small">O</span> arm &nbsp;→&nbsp;
-                                    <span class="kbd is-small">2</span> ALT_HOLD &nbsp;→&nbsp; hold
-                                    <span class="kbd is-small">W</span> to climb.</li>
-                                <li>Fly over the tag with the <span class="kbd is-small">←</span><span
-                                        class="kbd is-small">↑</span><span class="kbd is-small">↓</span><span
-                                        class="kbd is-small">→</span> keys, watching
-                                    <span class="topic-tag">ibvs/debug_image</span>.</li>
-                                <li>Press <span class="kbd is-small is-orange">I</span> — the IBVS button. The next tag
-                                    detection engages: the controller takes <code>GUIDED_NOGPS</code> itself and starts
-                                    aligning.</li>
-                                <li>Take back control any time with <span class="kbd is-small">2</span>; hand it back
-                                    with <span class="kbd is-small">G</span> or press
-                                    <span class="kbd is-small is-orange">I</span> again.</li>
-                            </ol>
-                            <p>Full key reference on the <a href="joystick.html">keyboard joystick page</a>.</p>
-                        </div>
+            <div class="split">
+                <div class="panel">
+                    <p class="panel-heading"><i class="fas fa-gamepad"></i> A — Joystick mission (real-world rehearsal)</p>
+                    <div class="prose">
+                        <ol>
+                            <li>Go to the <strong>ibvs</strong> window, select the keyboard pane, press ↑ and Enter to
+                                start <code>keyboard_rc.py</code>. Wait for
+                                <em>“SYSID_MYGCS=1 — RC override enabled”</em>.</li>
+                            <li><span class="kbd sm">O</span> arm &rarr; <span class="kbd sm">2</span> ALT_HOLD &rarr;
+                                hold <span class="kbd sm">W</span> to climb.</li>
+                            <li>Fly over the tag with <span class="kbd sm">&larr;</span><span class="kbd sm">&uarr;</span><span
+                                    class="kbd sm">&darr;</span><span class="kbd sm">&rarr;</span>, watching
+                                <span class="topic-tag">ibvs/debug_image</span>.</li>
+                            <li>Press <span class="kbd sm orange">I</span> — the IBVS button. The next tag detection
+                                engages: the controller takes <code>GUIDED_NOGPS</code> itself and starts aligning.</li>
+                            <li>Take back control any time with <span class="kbd sm">2</span>; hand it back with
+                                <span class="kbd sm">G</span> or press <span class="kbd sm orange">I</span> again.</li>
+                        </ol>
+                        <a class="btn btn-primary" href="joystick.html" style="margin-top: 0.4rem;">Full key reference
+                            <i class="fas fa-arrow-right"></i></a>
                     </div>
                 </div>
 
-                <div class="column is-half">
-                    <div class="box is-static" style="height: 100%;">
-                        <p class="heading" style="color: #F5821F; font-weight: bold;"><i class="fas fa-robot"></i>
-                            &nbsp;B — SERVICE MISSION (fully autonomous)</p>
-                        <div class="content" style="margin-top: 1rem;">
-                            <p>Three <code>std_srvs/Trigger</code> services, called from any terminal:</p>
-                            <pre><code># 1. GUIDED_NOGPS + arm + climb to 1 m, then hold
+                <div class="panel">
+                    <p class="panel-heading"><i class="fas fa-robot"></i> B — Service mission (fully autonomous)</p>
+                    <div class="prose">
+                        <p>Three <code>std_srvs/Trigger</code> services, called from any terminal:</p>
+                        <pre><code># 1. GUIDED_NOGPS + arm + climb to 1 m, then hold
 rosservice call /red/ibvs/takeoff
 
 # 2. start servoing toward the tag
@@ -207,32 +208,31 @@ rosservice call /red/ibvs/start
 
 # abort servoing, hold position
 rosservice call /red/ibvs/stop</code></pre>
-                            <p>Takeoff climbs and <em>holds</em> — nothing else happens until you call
-                                <code>ibvs/start</code>. Watch <span class="topic-tag">ibvs/state</span>: when it shows
-                                <span class="state-badge">TAG_IN_SIGHT</span> the detector sees the marker and
-                                <code>ibvs/start</code> will engage immediately.</p>
-                        </div>
+                        <p>Takeoff climbs and <em>holds</em> — nothing else happens until you call
+                            <code>ibvs/start</code>. Watch <span class="topic-tag">ibvs/state</span>: when it shows
+                            <span class="state-badge">TAG_IN_SIGHT</span> the detector sees the marker and
+                            <code>ibvs/start</code> will engage immediately.</p>
                     </div>
                 </div>
             </div>
 
-            <h3 class="title is-4" style="margin-top: 2rem;">What you should see</h3>
-            <div class="content">
+            <h3 class="section-title-sub">What you should see</h3>
+            <div class="prose narrow" style="margin: 0;">
                 <p>Follow <span class="topic-tag">ibvs/state</span> in the <strong>ibvs</strong> window:</p>
-                <p style="line-height: 2.2;">
-                    <span class="state-badge">WAIT_ARM</span> →
-                    <span class="state-badge">CLIMB</span> <em>(service mission only)</em> →
-                    <span class="state-badge">HOVER</span> / <span class="state-badge">TAG_IN_SIGHT</span> →
-                    <span class="state-badge is-active">ALIGN</span> →
-                    <span class="state-badge is-active">ALIGNED</span>
+                <p style="line-height: 2.4;">
+                    <span class="state-badge">WAIT_ARM</span> &rarr;
+                    <span class="state-badge">CLIMB</span> <em>(service mission only)</em> &rarr;
+                    <span class="state-badge">HOVER</span> / <span class="state-badge">TAG_IN_SIGHT</span> &rarr;
+                    <span class="state-badge active">ALIGN</span> &rarr;
+                    <span class="state-badge active">ALIGNED</span>
                 </p>
                 <ul>
-                    <li>In <span class="state-badge is-active">ALIGN</span> the vehicle first centers the marker
+                    <li>In <span class="state-badge active">ALIGN</span> the vehicle first centers the marker
                         laterally — descent is blocked until the marker is within 0.25&nbsp;m of center (the descend
                         gate), so the tag cannot escape the shrinking camera view.</li>
                     <li>Once centered it descends, regulating to a standoff of 0.5&nbsp;m above the tag
                         (<code>target_z: -0.5</code>).</li>
-                    <li><span class="state-badge is-active">ALIGNED</span> means the error stayed below 15&nbsp;cm for
+                    <li><span class="state-badge active">ALIGNED</span> means the error stayed below 15&nbsp;cm for
                         2&nbsp;s — the vehicle hovers centered over the marker.</li>
                     <li>If the detector loses the marker for 0.5&nbsp;s the state drops to
                         <span class="state-badge">TAG_LOST</span> and the vehicle holds position until the marker is
@@ -244,81 +244,92 @@ rosservice call /red/ibvs/stop</code></pre>
 
     <!-- Troubleshooting -->
     <section class="section">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">5&nbsp;·&nbsp;Troubleshooting</h2>
+        <div class="container">
+            <span class="overline">When things go wrong</span>
+            <h2 class="section-title">Troubleshooting</h2>
 
-            <table class="table doc-table is-fullwidth">
-                <thead>
-                    <tr>
-                        <th style="width: 30%;">Symptom</th>
-                        <th>Cause &amp; fix</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>Does not take off (service mission)</td>
-                        <td>Did you call <code>ibvs/takeoff</code>? Arming alone never climbs. Also: ArduPilot
-                            auto-disarms after ~10&nbsp;s on the ground, and right after SITL boot the EKF may reject
-                            arming — wait ~30&nbsp;s and retry.</td>
-                    </tr>
-                    <tr>
-                        <td>Flies away on takeoff</td>
-                        <td><code>GUID_OPTIONS</code> is not 0 — the thrust field is being read as raw thrust. The
-                            startup sets it, but verify with
-                            <code>rosrun mavros mavparam -n /red/mavros get GUID_OPTIONS</code>.</td>
-                    </tr>
-                    <tr>
-                        <td>Keyboard sticks do nothing</td>
-                        <td>ArduPilot only accepts RC overrides from the system id in <code>SYSID_MYGCS</code>.
-                            <code>keyboard_rc.py</code> sets it to 1 automatically — wait for the
-                            <em>“RC override enabled”</em> line before flying, and keep the keyboard pane focused
-                            (keys go to whichever pane is active).</td>
-                    </tr>
-                    <tr>
-                        <td>Stuck in <span class="state-badge">WAIT_ARM</span></td>
-                        <td><span class="topic-tag">mavros/state</span> shows mode ≠ <code>GUIDED_NOGPS</code> or
-                            <code>armed: false</code>. In the joystick mission this is normal until you press
-                            <span class="kbd is-small is-orange">I</span> and the tag is detected.</td>
-                    </tr>
-                    <tr>
-                        <td>Stuck in <span class="state-badge">TAG_LOST</span></td>
-                        <td>No fresh <span class="topic-tag">ibvs/target_point</span>. Check
-                            <span class="topic-tag">ibvs/debug_image</span> — is the marker in the camera view? Is the
-                            detector printing camera-info errors?</td>
-                    </tr>
-                    <tr>
-                        <td>Pressed <span class="kbd is-small is-orange">I</span>, nothing happens</td>
-                        <td>Engagement needs three things: the vehicle <strong>armed</strong>, the controller running,
-                            and a <strong>fresh tag detection</strong> after the button press. Check
-                            <span class="topic-tag">ibvs/target_point</span> is actually publishing.</td>
-                    </tr>
-                </tbody>
-            </table>
+            <div class="tbl-wrap">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th style="width: 28%;">Symptom</th>
+                            <th>Cause &amp; fix</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Does not take off (service mission)</td>
+                            <td>Did you call <code>ibvs/takeoff</code>? Arming alone never climbs. Also: ArduPilot
+                                auto-disarms after ~10&nbsp;s on the ground, and right after SITL boot the EKF may
+                                reject arming — wait ~30&nbsp;s and retry.</td>
+                        </tr>
+                        <tr>
+                            <td>Flies away on takeoff</td>
+                            <td><code>GUID_OPTIONS</code> is not 0 — the thrust field is being read as raw thrust. The
+                                startup sets it, but verify with
+                                <code>rosrun mavros mavparam -n /red/mavros get GUID_OPTIONS</code>.</td>
+                        </tr>
+                        <tr>
+                            <td>Keyboard sticks do nothing</td>
+                            <td>ArduPilot only accepts RC overrides from the system id in <code>SYSID_MYGCS</code>.
+                                <code>keyboard_rc.py</code> sets it to 1 automatically — wait for the
+                                <em>“RC override enabled”</em> line before flying, and keep the keyboard pane focused
+                                (keys go to whichever pane is active).</td>
+                        </tr>
+                        <tr>
+                            <td>Stuck in <span class="state-badge">WAIT_ARM</span></td>
+                            <td><span class="topic-tag">mavros/state</span> shows mode ≠ <code>GUIDED_NOGPS</code> or
+                                <code>armed: false</code>. In the joystick mission this is normal until you press
+                                <span class="kbd sm orange">I</span> and the tag is detected.</td>
+                        </tr>
+                        <tr>
+                            <td>Stuck in <span class="state-badge">TAG_LOST</span></td>
+                            <td>No fresh <span class="topic-tag">ibvs/target_point</span>. Check
+                                <span class="topic-tag">ibvs/debug_image</span> — is the marker in the camera view? Is
+                                the detector printing camera-info errors?</td>
+                        </tr>
+                        <tr>
+                            <td>Pressed <span class="kbd sm orange">I</span>, nothing happens</td>
+                            <td>Engagement needs three things: the vehicle <strong>armed</strong>, the controller
+                                running, and a <strong>fresh tag detection</strong> after the button press. Check
+                                <span class="topic-tag">ibvs/target_point</span> is actually publishing.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
 
-            <div class="content" style="margin-top: 1.5rem;">
+            <div class="prose narrow" style="margin: 0;">
                 <p>More background on every failure mode is in the
                     <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/README.md"
                         target="_blank">repository README</a>.</p>
+            </div>
+
+            <div class="pager">
+                <a href="index.html" class="prev">
+                    <span class="pager-label"><i class="fas fa-arrow-left"></i> Previous</span>
+                    <span class="pager-title">Home</span>
+                </a>
+                <a href="joystick.html" class="next">
+                    <span class="pager-label">Next <i class="fas fa-arrow-right"></i></span>
+                    <span class="pager-title">Flying with the keyboard joystick</span>
+                </a>
             </div>
         </div>
     </section>
 
     <!-- Footer -->
-    <footer class="footer lab-footer">
-        <div class="container">
-            <div class="content has-text-centered">
-                <div class="columns is-centered" style="margin-bottom: 1rem; gap: 1rem;">
-                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
-                        <img src="./logo/FER_logo.png" alt="FER" style="height: 90px; width: auto; opacity: 0.9;" />
-                    </div>
-                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
-                        <img src="./logo/Larics_logo.png" alt="LARICS" style="height: 40px; width: auto; opacity: 0.9;" />
-                    </div>
-                </div>
-                <p>&copy; 2026 Jakob Domislovic | University of Zagreb — LARICS<br>
-                    <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank">GitHub Repository</a>
-                </p>
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-logos">
+                <div class="logo-chip"><img src="./logo/FER_logo.png" alt="FER" style="height: 70px; width: auto;"></div>
+                <div class="logo-chip"><img src="./logo/Larics_logo.png" alt="LARICS" style="height: 38px; width: auto;"></div>
             </div>
+            <p><strong>IBVS Perching</strong> — Image-Based Visual Servoing for UAV Perching</p>
+            <p class="fine">
+                &copy; 2026 Jakob Domislovic · University of Zagreb · LARICS<br>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i>
+                    GitHub Repository</a>
+            </p>
         </div>
     </footer>
 

@@ -1,45 +1,48 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
     <meta charset="utf-8">
-    <meta name="description" content="ibvs_perching — flying the simulated UAV with the keyboard joystick: every key explained.">
+    <meta name="description" content="IBVS Perching — flying the simulated UAV with the keyboard joystick: every key explained.">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Keyboard joystick — ibvs_perching</title>
+    <title>Keyboard joystick — IBVS Perching</title>
 
-    <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
-    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/js/all.min.js"></script>
 </head>
 
 <body>
 
-    <nav class="doc-nav">
-        <div class="container is-max-desktop">
-            <a href="index.html"><i class="fas fa-home"></i> Home</a>
-            <a href="simulation.html">Running the simulation</a>
-            <a href="joystick.html" class="is-active">Keyboard joystick</a>
-            <a href="controller.html">The controller</a>
-            <a href="code.html">Code walkthrough</a>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a class="nav-brand" href="index.html"><i class="fas fa-crosshairs"></i> IBVS Perching</a>
+            <div class="nav-links">
+                <a href="index.html">Home</a>
+                <a href="simulation.html">Simulation</a>
+                <a href="joystick.html" class="is-active">Joystick</a>
+                <a href="controller.html">Controller</a>
+                <a href="code.html">Code</a>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i> GitHub</a>
+            </div>
         </div>
     </nav>
 
-    <section class="hero lab-hero">
-        <div class="hero-body" style="padding: 2.5rem 1.5rem;">
-            <div class="container is-max-desktop has-text-centered">
-                <h1 class="title is-2">Flying with the keyboard joystick</h1>
-                <p class="subtitle is-5">Your keyboard becomes the RC transmitter of the simulated UAV</p>
-            </div>
+    <header class="hero">
+        <div class="hero-inner compact">
+            <span class="hero-eyebrow">Docs &middot; Manual flight</span>
+            <h1 class="hero-title" style="font-size: clamp(2rem, 5vw, 2.9rem);">Flying with the <span class="accent">keyboard joystick</span></h1>
+            <p class="hero-sub">Your keyboard becomes the RC transmitter of the simulated UAV.</p>
         </div>
-    </section>
+    </header>
 
     <!-- Concept -->
     <section class="section">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">What it is</h2>
-            <div class="content">
+        <div class="container">
+            <span class="overline">Concept</span>
+            <h2 class="section-title">What it is</h2>
+            <div class="prose narrow" style="margin: 0;">
                 <p>
                     <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/scripts/keyboard_rc.py"
                         target="_blank"><code>keyboard_rc.py</code></a> stands in for the real RC transmitter when
@@ -51,274 +54,280 @@
                 </p>
             </div>
 
-            <div class="diagram-box" style="margin-top: 1.5rem;">
-                <svg viewBox="0 0 960 150" xmlns="http://www.w3.org/2000/svg" font-family="Noto Sans, sans-serif">
+            <div class="diagram">
+                <svg viewBox="0 0 960 150" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
                     <defs>
                         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
                             orient="auto-start-reverse">
                             <path d="M 0 0 L 10 5 L 0 10 z" fill="#888" />
                         </marker>
                     </defs>
-                    <rect x="15" y="45" width="160" height="60" rx="10" fill="#F5821F" />
+                    <rect x="15" y="45" width="160" height="60" rx="14" fill="#F5821F" />
                     <text x="95" y="71" text-anchor="middle" font-size="14" font-weight="bold" fill="white">keyboard_rc.py</text>
                     <text x="95" y="89" text-anchor="middle" font-size="11.5" fill="#ffffffcc">keys → stick values</text>
 
-                    <rect x="255" y="45" width="120" height="60" rx="10" fill="#eeeeee" stroke="#bbb" />
-                    <text x="315" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#363636">mavros</text>
+                    <rect x="255" y="45" width="120" height="60" rx="14" fill="#f1ece6" stroke="#d8cec4" />
+                    <text x="315" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#33291f">mavros</text>
 
-                    <rect x="455" y="45" width="140" height="60" rx="10" fill="#eeeeee" stroke="#bbb" />
-                    <text x="525" y="71" text-anchor="middle" font-size="14" font-weight="bold" fill="#363636">ArduPilot</text>
-                    <text x="525" y="89" text-anchor="middle" font-size="11.5" fill="#666">flies the vehicle</text>
+                    <rect x="455" y="45" width="140" height="60" rx="14" fill="#f1ece6" stroke="#d8cec4" />
+                    <text x="525" y="71" text-anchor="middle" font-size="14" font-weight="bold" fill="#33291f">ArduPilot</text>
+                    <text x="525" y="89" text-anchor="middle" font-size="11.5" fill="#7d7168">flies the vehicle</text>
 
-                    <rect x="675" y="45" width="120" height="60" rx="10" fill="#eeeeee" stroke="#bbb" />
-                    <text x="735" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#363636">mavros</text>
+                    <rect x="675" y="45" width="120" height="60" rx="14" fill="#f1ece6" stroke="#d8cec4" />
+                    <text x="735" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#33291f">mavros</text>
 
-                    <rect x="835" y="45" width="115" height="60" rx="10" fill="#F5821F" />
+                    <rect x="835" y="45" width="115" height="60" rx="14" fill="#F5821F" />
                     <text x="892" y="71" text-anchor="middle" font-size="14" font-weight="bold" fill="white">rc_to_joy</text>
                     <text x="892" y="89" text-anchor="middle" font-size="11.5" fill="#ffffffcc">→ /joy</text>
 
                     <line x1="175" y1="75" x2="253" y2="75" stroke="#888" stroke-width="2" marker-end="url(#arr)" />
-                    <text x="214" y="63" text-anchor="middle" font-size="10.5" fill="#666">rc/override</text>
+                    <text x="214" y="63" text-anchor="middle" font-size="10.5" fill="#7d7168">rc/override</text>
                     <line x1="375" y1="75" x2="453" y2="75" stroke="#888" stroke-width="2" marker-end="url(#arr)" />
-                    <text x="414" y="63" text-anchor="middle" font-size="10.5" fill="#666">MAVLink</text>
+                    <text x="414" y="63" text-anchor="middle" font-size="10.5" fill="#7d7168">MAVLink</text>
                     <line x1="595" y1="75" x2="673" y2="75" stroke="#888" stroke-width="2" marker-end="url(#arr)" />
-                    <text x="634" y="63" text-anchor="middle" font-size="10.5" fill="#666">RC_CHANNELS</text>
+                    <text x="634" y="63" text-anchor="middle" font-size="10.5" fill="#7d7168">RC_CHANNELS</text>
                     <line x1="795" y1="75" x2="833" y2="75" stroke="#888" stroke-width="2" marker-end="url(#arr)" />
-                    <text x="814" y="63" text-anchor="middle" font-size="10.5" fill="#666">rc/in</text>
+                    <text x="814" y="63" text-anchor="middle" font-size="10.5" fill="#7d7168">rc/in</text>
                 </svg>
             </div>
             <p class="figure-caption">The keyboard drives the exact same RC pipeline a real transmitter would.</p>
 
-            <div class="callout">
-                <p class="callout-title"><i class="fas fa-circle-info"></i>&nbsp; SYSID_MYGCS — handled for you</p>
-                <p>ArduPilot only accepts RC overrides from the ground station whose system id matches its
-                    <code>SYSID_MYGCS</code> parameter (factory default 255 = MAVProxy, while mavros is 1 — so by
-                    default every override is <em>silently ignored</em>). <code>keyboard_rc.py</code> sets
-                    <code>SYSID_MYGCS = 1</code> itself at startup. <strong>Wait for the line
-                    “SYSID_MYGCS=1 — RC override enabled” before flying.</strong></p>
+            <div class="container narrow" style="padding: 0;">
+                <div class="callout">
+                    <div class="callout-icon"><i class="fas fa-circle-info"></i></div>
+                    <div>
+                        <p class="callout-title">SYSID_MYGCS — handled for you</p>
+                        <p>ArduPilot only accepts RC overrides from the ground station whose system id matches its
+                            <code>SYSID_MYGCS</code> parameter (factory default 255 = MAVProxy, while mavros is 1 — so
+                            by default every override is <em>silently ignored</em>). <code>keyboard_rc.py</code> sets
+                            <code>SYSID_MYGCS = 1</code> itself at startup. <strong>Wait for the line “SYSID_MYGCS=1 —
+                            RC override enabled” before flying.</strong></p>
+                    </div>
+                </div>
             </div>
         </div>
     </section>
 
     <!-- Keys -->
-    <section class="section hero is-light">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">The keys</h2>
-            <div class="content">
+    <section class="section alt">
+        <div class="container">
+            <span class="overline">Reference</span>
+            <h2 class="section-title">The keys</h2>
+            <div class="prose narrow" style="margin: 0;">
                 <p>Start it in the <strong>ibvs</strong> tmux window (the command is pre-typed — press ↑ and Enter):</p>
                 <pre><code>rosrun ibvs_perching keyboard_rc.py __ns:=$UAV_NAMESPACE</code></pre>
                 <p><strong>Keys act on whichever tmux pane has focus</strong> — keep the keyboard pane selected while
                     flying. All four sticks are spring-loaded: a key deflects the stick, releasing it lets the stick
                     snap back to center (hold the key for a continuous command — keyboard auto-repeat keeps it
-                    deflected). The bottom status line always shows the current mode, armed state, and stick values.</p>
+                    deflected). The bottom status line always shows the current mode, armed state, and stick
+                    values.</p>
             </div>
 
-            <!-- flight keys -->
-            <h3 class="title is-4" style="margin-top: 2rem;">Flight sticks</h3>
-            <div class="columns is-multiline">
-                <div class="column is-one-third">
-                    <div class="key-cluster">
-                        <p class="cluster-title">Roll &amp; pitch — arrow keys</p>
-                        <div class="cluster-keys">
-                            <div class="key-row"><span class="kbd">&uarr;</span></div>
-                            <div class="key-row">
-                                <span class="kbd">&larr;</span><span class="kbd">&darr;</span><span class="kbd">&rarr;</span>
-                            </div>
+            <h3 class="section-title-sub">Flight sticks</h3>
+            <div class="grid">
+                <div class="key-cluster">
+                    <p class="cluster-title">Roll &amp; pitch — arrow keys</p>
+                    <div class="cluster-keys">
+                        <div class="key-row"><span class="kbd">&uarr;</span></div>
+                        <div class="key-row">
+                            <span class="kbd">&larr;</span><span class="kbd">&darr;</span><span class="kbd">&rarr;</span>
                         </div>
-                        <p class="cluster-desc"><strong>↑ / ↓</strong> pitch — fly forward / backward<br>
-                            <strong>← / →</strong> roll — fly left / right</p>
                     </div>
+                    <p class="cluster-desc"><strong>↑ / ↓</strong> pitch — fly forward / backward<br>
+                        <strong>← / →</strong> roll — fly left / right</p>
                 </div>
-                <div class="column is-one-third">
-                    <div class="key-cluster">
-                        <p class="cluster-title">Throttle — climb &amp; descend</p>
-                        <div class="cluster-keys">
-                            <div class="key-row"><span class="kbd">W</span></div>
-                            <div class="key-row"><span class="kbd">S</span></div>
-                        </div>
-                        <p class="cluster-desc"><strong>W</strong> climb &nbsp;·&nbsp; <strong>S</strong> descend.<br>
-                            In ALT_HOLD, released = hold current altitude.</p>
+                <div class="key-cluster">
+                    <p class="cluster-title">Throttle — climb &amp; descend</p>
+                    <div class="cluster-keys">
+                        <div class="key-row"><span class="kbd">W</span></div>
+                        <div class="key-row"><span class="kbd">S</span></div>
                     </div>
+                    <p class="cluster-desc"><strong>W</strong> climb &nbsp;·&nbsp; <strong>S</strong> descend.<br>
+                        In ALT_HOLD, released = hold current altitude.</p>
                 </div>
-                <div class="column is-one-third">
-                    <div class="key-cluster">
-                        <p class="cluster-title">Yaw</p>
-                        <div class="cluster-keys">
-                            <div class="key-row"><span class="kbd">A</span><span class="kbd">D</span></div>
-                        </div>
-                        <p class="cluster-desc"><strong>A</strong> yaw left &nbsp;·&nbsp; <strong>D</strong> yaw
-                            right.</p>
+                <div class="key-cluster">
+                    <p class="cluster-title">Yaw</p>
+                    <div class="cluster-keys">
+                        <div class="key-row"><span class="kbd">A</span><span class="kbd">D</span></div>
                     </div>
+                    <p class="cluster-desc"><strong>A</strong> yaw left &nbsp;·&nbsp; <strong>D</strong> yaw right.</p>
                 </div>
             </div>
 
-            <!-- command keys -->
-            <h3 class="title is-4" style="margin-top: 2rem;">IBVS, modes, arming</h3>
-            <div class="columns is-multiline">
-                <div class="column is-one-third">
-                    <div class="key-cluster" style="border: 2px solid #F5821F;">
-                        <p class="cluster-title">The IBVS button</p>
-                        <div class="cluster-keys">
-                            <div class="key-row"><span class="kbd is-orange">I</span><span class="kbd">K</span></div>
-                        </div>
-                        <p class="cluster-desc"><strong>I</strong> calls <code>ibvs/start</code> — the next tag
-                            detection <em>engages</em> the controller.<br><strong>K</strong> calls
-                            <code>ibvs/stop</code> — stop servoing, hover.<br>
-                            This is the button the real joystick will have.</p>
+            <h3 class="section-title-sub">IBVS, modes, arming</h3>
+            <div class="grid">
+                <div class="key-cluster featured">
+                    <p class="cluster-title">★ The IBVS button</p>
+                    <div class="cluster-keys">
+                        <div class="key-row"><span class="kbd orange">I</span><span class="kbd">K</span></div>
                     </div>
+                    <p class="cluster-desc"><strong>I</strong> calls <code>ibvs/start</code> — the next tag detection
+                        <em>engages</em> the controller.<br><strong>K</strong> calls <code>ibvs/stop</code> — stop
+                        servoing, hover.<br>This is the button the real joystick will have.</p>
                 </div>
-                <div class="column is-one-third">
-                    <div class="key-cluster">
-                        <p class="cluster-title">Flight modes</p>
-                        <div class="cluster-keys">
-                            <div class="key-row">
-                                <span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span><span class="kbd">G</span>
-                            </div>
+                <div class="key-cluster">
+                    <p class="cluster-title">Flight modes</p>
+                    <div class="cluster-keys">
+                        <div class="key-row">
+                            <span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span><span class="kbd">G</span>
                         </div>
-                        <p class="cluster-desc"><strong>1</strong> STABILIZE · <strong>2</strong> ALT_HOLD ·
-                            <strong>3</strong> LOITER — any of these = <em>pilot takes over</em>.<br>
-                            <strong>G</strong> GUIDED_NOGPS = <em>hand control back</em>.</p>
                     </div>
+                    <p class="cluster-desc"><strong>1</strong> STABILIZE · <strong>2</strong> ALT_HOLD ·
+                        <strong>3</strong> LOITER — any of these = <em>pilot takes over</em>.<br>
+                        <strong>G</strong> GUIDED_NOGPS = <em>hand control back</em>.</p>
                 </div>
-                <div class="column is-one-third">
-                    <div class="key-cluster">
-                        <p class="cluster-title">Arming &amp; utility</p>
-                        <div class="cluster-keys">
-                            <div class="key-row">
-                                <span class="kbd">O</span><span class="kbd">P</span><span class="kbd is-wide">space</span>
-                            </div>
-                            <div class="key-row"><span class="kbd">H</span><span class="kbd">Q</span></div>
+                <div class="key-cluster">
+                    <p class="cluster-title">Arming &amp; utility</p>
+                    <div class="cluster-keys">
+                        <div class="key-row">
+                            <span class="kbd">O</span><span class="kbd">P</span><span class="kbd wide">space</span>
                         </div>
-                        <p class="cluster-desc"><strong>O</strong> arm · <strong>P</strong> disarm (mid-air = crash!) ·
-                            <strong>space</strong> center all sticks ·<br><strong>H</strong> help ·
-                            <strong>Q</strong> quit (releases all overrides).</p>
+                        <div class="key-row"><span class="kbd">H</span><span class="kbd">Q</span></div>
                     </div>
+                    <p class="cluster-desc"><strong>O</strong> arm · <strong>P</strong> disarm (mid-air = crash!) ·
+                        <strong>space</strong> center all sticks ·<br><strong>H</strong> help · <strong>Q</strong>
+                        quit (releases all overrides).</p>
                 </div>
             </div>
 
-            <div class="callout">
-                <p class="callout-title"><i class="fas fa-lightbulb"></i>&nbsp; Fly in ALT_HOLD, not STABILIZE</p>
-                <p>With a spring-loaded keyboard throttle, <code>ALT_HOLD</code>
-                    (<span class="kbd is-small">2</span>) is the mode to fly: centered throttle means “hold this
-                    altitude”, and <span class="kbd is-small">W</span>/<span class="kbd is-small">S</span> command
-                    climb/descent rates. In <code>STABILIZE</code> the throttle stick maps to raw thrust, which is very
-                    hard to manage with keys. While the vehicle is <em>disarmed</em> the throttle idles low
-                    automatically — ArduPilot refuses to arm with a raised throttle.</p>
+            <div class="container narrow" style="padding: 0;">
+                <div class="callout">
+                    <div class="callout-icon"><i class="fas fa-lightbulb"></i></div>
+                    <div>
+                        <p class="callout-title">Fly in ALT_HOLD, not STABILIZE</p>
+                        <p>With a spring-loaded keyboard throttle, <code>ALT_HOLD</code>
+                            (<span class="kbd sm">2</span>) is the mode to fly: centered throttle means “hold this
+                            altitude”, and <span class="kbd sm">W</span>/<span class="kbd sm">S</span> command
+                            climb/descent rates. In <code>STABILIZE</code> the throttle stick maps to raw thrust,
+                            which is very hard to manage with keys. While the vehicle is <em>disarmed</em> the
+                            throttle idles low automatically — ArduPilot refuses to arm with a raised throttle.</p>
+                    </div>
+                </div>
             </div>
         </div>
     </section>
 
     <!-- First flight -->
     <section class="section">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">Your first flight, step by step</h2>
+        <div class="container narrow">
+            <span class="overline">Tutorial</span>
+            <h2 class="section-title">Your first flight, step by step</h2>
 
-            <div style="margin-top: 1.5rem;">
+            <div class="steps">
                 <div class="step">
-                    <div class="step-number">1</div>
-                    <div class="step-body">Start the sim (<a href="simulation.html">guide</a>), open the
+                    <div class="step-num">1</div>
+                    <div class="step-body">Start the sim (<a href="simulation.html" class="prose">guide</a>), open the
                         <strong>ibvs</strong> window, select the keyboard pane, press ↑ + Enter. Wait for
                         <em>“SYSID_MYGCS=1 — RC override enabled”</em>.</div>
                 </div>
                 <div class="step">
-                    <div class="step-number">2</div>
-                    <div class="step-body">Press <span class="kbd is-small">O</span> to arm, then
-                        <span class="kbd is-small">2</span> for ALT_HOLD. The status line at the bottom should show
+                    <div class="step-num">2</div>
+                    <div class="step-body">Press <span class="kbd sm">O</span> to arm, then
+                        <span class="kbd sm">2</span> for ALT_HOLD. The status line at the bottom should show
                         <code>ALT_HOLD&nbsp;&nbsp;ARMED</code>.</div>
                 </div>
                 <div class="step">
-                    <div class="step-number">3</div>
-                    <div class="step-body">Hold <span class="kbd is-small">W</span> — the vehicle climbs. Release to
-                        hold altitude. Take it to 2–3&nbsp;m.</div>
+                    <div class="step-num">3</div>
+                    <div class="step-body">Hold <span class="kbd sm">W</span> — the vehicle climbs. Release to hold
+                        altitude. Take it to 2–3&nbsp;m.</div>
                 </div>
                 <div class="step">
-                    <div class="step-number">4</div>
-                    <div class="step-body">Fly around with <span class="kbd is-small">←</span><span
-                            class="kbd is-small">↑</span><span class="kbd is-small">↓</span><span
-                            class="kbd is-small">→</span> (tap for small corrections, hold for larger moves) and yaw
-                        with <span class="kbd is-small">A</span>/<span class="kbd is-small">D</span>. Watch the camera
-                        in <code>rqt_image_view</code> (<span class="topic-tag">ibvs/debug_image</span>) and bring the
+                    <div class="step-num">4</div>
+                    <div class="step-body">Fly around with <span class="kbd sm">&larr;</span><span
+                            class="kbd sm">&uarr;</span><span class="kbd sm">&darr;</span><span
+                            class="kbd sm">&rarr;</span> (tap for small corrections, hold for larger moves) and yaw
+                        with <span class="kbd sm">A</span>/<span class="kbd sm">D</span>. Watch the camera in
+                        <code>rqt_image_view</code> (<span class="topic-tag">ibvs/debug_image</span>) and bring the
                         ArUco marker into view — the tag sits at the world origin.</div>
                 </div>
                 <div class="step">
-                    <div class="step-number">5</div>
-                    <div class="step-body">With the marker visible, press
-                        <span class="kbd is-small is-orange">I</span>. The controller announces the engagement, takes
-                        <code>GUIDED_NOGPS</code>, and <span class="topic-tag">ibvs/state</span> jumps to
-                        <span class="state-badge is-active">ALIGN</span>. Hands off — it centers the marker, then
+                    <div class="step-num">5</div>
+                    <div class="step-body">With the marker visible, press <span class="kbd sm orange">I</span>. The
+                        controller announces the engagement, takes <code>GUIDED_NOGPS</code>, and
+                        <span class="topic-tag">ibvs/state</span> jumps to
+                        <span class="state-badge active">ALIGN</span>. Hands off — it centers the marker, then
                         descends to 0.5&nbsp;m above it and reports
-                        <span class="state-badge is-active">ALIGNED</span>.</div>
+                        <span class="state-badge active">ALIGNED</span>.</div>
                 </div>
                 <div class="step">
-                    <div class="step-number">6</div>
-                    <div class="step-body">Practice the safety takeover: press <span class="kbd is-small">2</span>
+                    <div class="step-num">6</div>
+                    <div class="step-body">Practice the safety takeover: press <span class="kbd sm">2</span>
                         mid-alignment. You get the sticks back instantly, and the controller will <em>not</em> steal
                         the mode back (the engagement is one-shot). Hand control back with
-                        <span class="kbd is-small">G</span>, or press <span class="kbd is-small is-orange">I</span>
-                        again to re-arm the engagement for the next detection.</div>
+                        <span class="kbd sm">G</span>, or press <span class="kbd sm orange">I</span> again to re-arm
+                        the engagement for the next detection.</div>
                 </div>
                 <div class="step">
-                    <div class="step-number">7</div>
-                    <div class="step-body">Done flying? <span class="kbd is-small">K</span> stops the servoing (hover),
-                        <span class="kbd is-small">P</span> disarms on the ground, and
-                        <span class="kbd is-small">Q</span> quits the joystick, releasing all RC overrides.</div>
+                    <div class="step-num">7</div>
+                    <div class="step-body">Done flying? <span class="kbd sm">K</span> stops the servoing (hover),
+                        <span class="kbd sm">P</span> disarms on the ground, and <span class="kbd sm">Q</span> quits
+                        the joystick, releasing all RC overrides.</div>
                 </div>
             </div>
 
             <div class="callout">
-                <p class="callout-title"><i class="fas fa-shield-halved"></i>&nbsp; Why the engagement is one-shot</p>
-                <p>After a pilot takeover the vision module usually keeps publishing detections. If the controller
-                    could re-engage on its own, pilot and software would fight over the flight mode — the most
-                    dangerous failure mode of a shared-control system. So the software mode switch is armed exactly
-                    once per button press: after a takeover, only <em>you</em> can hand control back
-                    (<span class="kbd is-small">G</span> or <span class="kbd is-small is-orange">I</span>). Details on
-                    the <a href="controller.html#engagement">controller page</a>.</p>
+                <div class="callout-icon"><i class="fas fa-shield-halved"></i></div>
+                <div>
+                    <p class="callout-title">Why the engagement is one-shot</p>
+                    <p>After a pilot takeover the vision module usually keeps publishing detections. If the controller
+                        could re-engage on its own, pilot and software would fight over the flight mode — the most
+                        dangerous failure mode of a shared-control system. So the software mode switch is armed
+                        exactly once per button press: after a takeover, only <em>you</em> can hand control back
+                        (<span class="kbd sm">G</span> or <span class="kbd sm orange">I</span>). Details on the
+                        <a href="controller.html#engagement" class="prose">controller page</a>.</p>
+                </div>
             </div>
         </div>
     </section>
 
     <!-- Under the hood -->
-    <section class="section hero is-light">
-        <div class="container is-max-desktop">
-            <h2 class="title is-3">Under the hood</h2>
-            <div class="content">
-                <ul>
-                    <li><strong>Stick mapping.</strong> Keys set a deflection on one of four RC channels (roll, pitch,
-                        throttle, yaw; ±150&nbsp;µs for attitude, ±250&nbsp;µs for throttle around a 1500&nbsp;µs
-                        center). A stick stays deflected while key auto-repeat keeps refreshing it and springs back
-                        ~0.6&nbsp;s after the last press. Everything is parameterized
-                        (<code>~step_tilt</code>, <code>~step_throttle</code>, <code>~hold_time</code>,
-                        <code>~channel/*</code>).</li>
-                    <li><strong>Modes and arming</strong> go through the regular mavros services
-                        (<code>mavros/set_mode</code>, <code>mavros/cmd/arming</code>) — exactly what a ground station
-                        would do.</li>
-                    <li><strong>The IBVS button</strong> (<span class="kbd is-small is-orange">I</span> /
-                        <span class="kbd is-small">K</span>) calls the controller's <code>ibvs/start</code> /
-                        <code>ibvs/stop</code> services. On the real vehicle the same services will be wired to a
-                        button on the RC transmitter.</li>
-                    <li><strong>Clean exit.</strong> Quitting publishes a full override release so ArduPilot returns to
-                        its own RC input, and the terminal is restored.</li>
-                </ul>
+    <section class="section alt">
+        <div class="container narrow prose">
+            <span class="overline">Internals</span>
+            <h2 class="section-title">Under the hood</h2>
+            <ul>
+                <li><strong>Stick mapping.</strong> Keys set a deflection on one of four RC channels (roll, pitch,
+                    throttle, yaw; ±150&nbsp;µs for attitude, ±250&nbsp;µs for throttle around a 1500&nbsp;µs center).
+                    A stick stays deflected while key auto-repeat keeps refreshing it and springs back ~0.6&nbsp;s
+                    after the last press. Everything is parameterized (<code>~step_tilt</code>,
+                    <code>~step_throttle</code>, <code>~hold_time</code>, <code>~channel/*</code>).</li>
+                <li><strong>Modes and arming</strong> go through the regular mavros services
+                    (<code>mavros/set_mode</code>, <code>mavros/cmd/arming</code>) — exactly what a ground station
+                    would do.</li>
+                <li><strong>The IBVS button</strong> (<span class="kbd sm orange">I</span> /
+                    <span class="kbd sm">K</span>) calls the controller's <code>ibvs/start</code> /
+                    <code>ibvs/stop</code> services. On the real vehicle the same services will be wired to a button
+                    on the RC transmitter.</li>
+                <li><strong>Clean exit.</strong> Quitting publishes a full override release so ArduPilot returns to
+                    its own RC input, and the terminal is restored.</li>
+            </ul>
+
+            <div class="pager">
+                <a href="simulation.html" class="prev">
+                    <span class="pager-label"><i class="fas fa-arrow-left"></i> Previous</span>
+                    <span class="pager-title">Running the simulation</span>
+                </a>
+                <a href="controller.html" class="next">
+                    <span class="pager-label">Next <i class="fas fa-arrow-right"></i></span>
+                    <span class="pager-title">The IBVS controller</span>
+                </a>
             </div>
         </div>
     </section>
 
     <!-- Footer -->
-    <footer class="footer lab-footer">
-        <div class="container">
-            <div class="content has-text-centered">
-                <div class="columns is-centered" style="margin-bottom: 1rem; gap: 1rem;">
-                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
-                        <img src="./logo/FER_logo.png" alt="FER" style="height: 90px; width: auto; opacity: 0.9;" />
-                    </div>
-                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
-                        <img src="./logo/Larics_logo.png" alt="LARICS" style="height: 40px; width: auto; opacity: 0.9;" />
-                    </div>
-                </div>
-                <p>&copy; 2026 Jakob Domislovic | University of Zagreb — LARICS<br>
-                    <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank">GitHub Repository</a>
-                </p>
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-logos">
+                <div class="logo-chip"><img src="./logo/FER_logo.png" alt="FER" style="height: 70px; width: auto;"></div>
+                <div class="logo-chip"><img src="./logo/Larics_logo.png" alt="LARICS" style="height: 38px; width: auto;"></div>
             </div>
+            <p><strong>IBVS Perching</strong> — Image-Based Visual Servoing for UAV Perching</p>
+            <p class="fine">
+                &copy; 2026 Jakob Domislovic · University of Zagreb · LARICS<br>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i>
+                    GitHub Repository</a>
+            </p>
         </div>
     </footer>
 

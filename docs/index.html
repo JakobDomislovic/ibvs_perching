@@ -1,419 +1,326 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
     <meta charset="utf-8">
     <meta name="description"
-        content="ibvs_perching: Image-Based Visual Servoing for autonomous UAV perching — ROS package, ArduPilot, simulation with a keyboard joystick.">
-    <meta property="og:title" content="ibvs_perching — Image-Based Visual Servoing for UAV Perching" />
+        content="IBVS Perching: Image-Based Visual Servoing for autonomous UAV perching — ROS package, ArduPilot, simulation with a keyboard joystick.">
+    <meta property="og:title" content="IBVS Perching — Image-Based Visual Servoing for UAV Perching" />
     <meta property="og:description"
         content="A minimal IBVS controller that flies an ArduPilot UAV onto a visual target by talking to mavros directly — documentation, simulation guide, and code walkthrough." />
     <meta property="og:url" content="https://jakobdomislovic.github.io/ibvs_perching/" />
-    <meta name="keywords"
-        content="IBVS, visual servoing, UAV, aerial perching, ArduPilot, mavros, ROS, ArUco, simulation">
+    <meta name="keywords" content="IBVS, visual servoing, UAV, aerial perching, ArduPilot, mavros, ROS, ArUco, simulation">
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <title>ibvs_perching — Image-Based Visual Servoing for UAV Perching</title>
+    <title>IBVS Perching — Image-Based Visual Servoing for UAV Perching</title>
 
-    <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
-
-    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/js/all.min.js"></script>
 </head>
 
 <body>
 
-    <!-- Hero -->
-    <section class="hero lab-hero">
-        <div class="hero-body" style="padding: 3rem 1.5rem;">
-            <div class="container is-max-desktop">
-                <div class="columns is-centered">
-                    <div class="column has-text-centered">
-                        <h1 class="title is-1" style="font-weight: bold; font-size: 2.5rem;">
-                            ibvs_perching
-                        </h1>
-                        <p class="subtitle is-4" style="margin-top: 0.75rem;">
-                            Image-Based Visual Servoing for Autonomous UAV Perching
-                        </p>
-
-                        <div class="is-size-5 publication-authors" style="color: white; margin-top: 1.5rem;">
-                            <span class="author-block"><strong>Jakob Domislovic</strong></span>
-                        </div>
-
-                        <div class="is-size-5 publication-authors" style="color: rgba(255,255,255,0.95); margin-top: 0.75rem;">
-                            <span class="author-block">University of Zagreb Faculty of Electrical Engineering and
-                                Computing</span>
-                        </div>
-                        <div class="is-size-5 publication-authors" style="color: rgba(255,255,255,0.95); margin-top: 0.25rem;">
-                            <span class="author-block">Laboratory for Robotics and Intelligent Control Systems
-                                (LARICS)</span>
-                        </div>
-
-                        <div style="margin-top: 1.25rem; font-size: 0.95rem; color: rgba(255,255,255,0.85);">
-                            current release: <strong>v1.0 — “simulation with joystick”</strong>
-                        </div>
-
-                        <div class="column has-text-centered" style="margin-top: 1.5rem;">
-                            <div class="publication-links">
-                                <span class="link-block">
-                                    <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"
-                                        class="external-link button is-normal is-rounded hero-button">
-                                        <span class="icon"><i class="fab fa-github"></i></span>
-                                        <span>GitHub</span>
-                                    </a>
-                                </span>
-                                <span class="link-block">
-                                    <a href="simulation.html"
-                                        class="external-link button is-normal is-rounded hero-button is-outlined">
-                                        <span class="icon"><i class="fas fa-rocket"></i></span>
-                                        <span>Run the Simulation</span>
-                                    </a>
-                                </span>
-                                <span class="link-block">
-                                    <a href="joystick.html"
-                                        class="external-link button is-normal is-rounded hero-button is-outlined">
-                                        <span class="icon"><i class="fas fa-gamepad"></i></span>
-                                        <span>Fly with the Keyboard</span>
-                                    </a>
-                                </span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a class="nav-brand" href="index.html"><i class="fas fa-crosshairs"></i> IBVS Perching</a>
+            <div class="nav-links">
+                <a href="index.html" class="is-active">Home</a>
+                <a href="simulation.html">Simulation</a>
+                <a href="joystick.html">Joystick</a>
+                <a href="controller.html">Controller</a>
+                <a href="code.html">Code</a>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i> GitHub</a>
             </div>
         </div>
-    </section>
+    </nav>
 
-    <!-- What is this -->
-    <section class="section hero is-light">
-        <div class="container is-max-desktop">
-            <div class="columns is-centered has-text-centered">
-                <div class="column is-four-fifths">
-                    <h2 class="title is-3">What is this?</h2>
-                    <div class="content has-text-justified" style="margin-top: 1.5rem; font-size: 1.05rem; line-height: 1.7;">
-                        <p>
-                            <strong>ibvs_perching</strong> is a small ROS (Noetic) package that lands a multirotor on a
-                            visual target using <strong>Image-Based Visual Servoing</strong>. A down-facing camera
-                            detects an ArUco marker, and a modal state-machine controller steers the vehicle until the
-                            marker is centered underneath it — then descends onto it.
-                        </p>
-                        <p>
-                            The defining design choice: the controller talks to ArduPilot <strong>directly</strong>
-                            through <span class="topic-tag">mavros/setpoint_raw/attitude</span> (body rates + a
-                            climb-rate command), completely bypassing the usual
-                            <code>uav_ros_stack</code> tracker/controller pipeline. That keeps the whole control path
-                            in one readable Python file and makes the package nearly self-contained.
-                        </p>
-                        <p>
-                            The vehicle is flown <strong>manually with a joystick</strong> (a keyboard stand-in in
-                            simulation, a real RC in the field), and IBVS takes over only when the pilot presses the
-                            <em>IBVS button</em> — the same interaction planned for the real experiments.
-                        </p>
-                    </div>
-                </div>
+    <header class="hero">
+        <div class="hero-inner">
+            <span class="hero-eyebrow">LARICS &middot; University of Zagreb</span>
+            <h1 class="hero-title">IBVS <span class="accent">Perching</span></h1>
+            <p class="hero-sub">Image-Based Visual Servoing for autonomous UAV perching — fly manually, press one
+                button, and the controller lands the drone on the target.</p>
+
+            <div class="hero-meta">
+                <strong>Jakob Domislovic</strong><br>
+                University of Zagreb, Faculty of Electrical Engineering and Computing<br>
+                Laboratory for Robotics and Intelligent Control Systems (LARICS)
             </div>
+
+            <div class="chips">
+                <span class="chip"><i class="fas fa-tag"></i> v1.0 — simulation with joystick</span>
+                <span class="chip"><i class="fas fa-microchip"></i> ROS Noetic · ArduPilot</span>
+            </div>
+
+            <div class="hero-actions">
+                <a class="btn btn-primary" href="simulation.html"><i class="fas fa-rocket"></i> Run the simulation</a>
+                <a class="btn btn-ghost" href="joystick.html"><i class="fas fa-gamepad"></i> Fly with the keyboard</a>
+                <a class="btn btn-ghost" href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i
+                        class="fab fa-github"></i> GitHub</a>
+            </div>
+        </div>
+    </header>
+
+    <!-- About -->
+    <section class="section">
+        <div class="container narrow prose">
+            <span class="overline">About</span>
+            <h2 class="section-title">What is this?</h2>
+            <p>
+                <strong>IBVS Perching</strong> is a small ROS (Noetic) package that lands a multirotor on a visual
+                target using <strong>Image-Based Visual Servoing</strong>. A down-facing camera detects an ArUco
+                marker, and a modal state-machine controller steers the vehicle until the marker is centered
+                underneath it — then descends onto it.
+            </p>
+            <p>
+                The defining design choice: the controller talks to ArduPilot <strong>directly</strong> through
+                <span class="topic-tag">mavros/setpoint_raw/attitude</span> (body rates + a climb-rate command),
+                completely bypassing the usual <code>uav_ros_stack</code> tracker/controller pipeline. That keeps the
+                whole control path in one readable Python file and makes the package nearly self-contained.
+            </p>
+            <p>
+                The vehicle is flown <strong>manually with a joystick</strong> (a keyboard stand-in in simulation, a
+                real RC in the field), and IBVS takes over only when the pilot presses the <em>IBVS button</em> — the
+                same interaction planned for the real experiments.
+            </p>
         </div>
     </section>
 
     <!-- Architecture -->
-    <section class="section">
-        <div class="container is-max-desktop">
-            <div class="columns is-centered has-text-centered">
-                <div class="column is-full">
-                    <h2 class="title is-3">How the pieces connect</h2>
+    <section class="section alt">
+        <div class="container">
+            <span class="overline">System</span>
+            <h2 class="section-title">How the pieces connect</h2>
 
-                    <div class="diagram-box" style="margin-top: 2rem;">
-                        <svg viewBox="0 0 980 360" xmlns="http://www.w3.org/2000/svg" font-family="Noto Sans, sans-serif">
-                            <defs>
-                                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7"
-                                    markerHeight="7" orient="auto-start-reverse">
-                                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#888" />
-                                </marker>
-                            </defs>
+            <div class="diagram">
+                <svg viewBox="0 0 980 360" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+                    <defs>
+                        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+                            orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="#888" />
+                        </marker>
+                    </defs>
 
-                            <!-- row 1: vision + control path -->
-                            <rect x="20" y="40" width="150" height="60" rx="10" fill="#eeeeee" stroke="#bbb" />
-                            <text x="95" y="66" text-anchor="middle" font-size="14" font-weight="bold" fill="#363636">Gazebo</text>
-                            <text x="95" y="84" text-anchor="middle" font-size="12" fill="#666">down-facing camera</text>
+                    <!-- row 1: vision + control path -->
+                    <rect x="20" y="40" width="150" height="60" rx="14" fill="#f1ece6" stroke="#d8cec4" />
+                    <text x="95" y="66" text-anchor="middle" font-size="14" font-weight="bold" fill="#33291f">Gazebo</text>
+                    <text x="95" y="84" text-anchor="middle" font-size="12" fill="#7d7168">down-facing camera</text>
 
-                            <rect x="240" y="40" width="170" height="60" rx="10" fill="#F5821F" />
-                            <text x="325" y="66" text-anchor="middle" font-size="14" font-weight="bold" fill="white">aruco_detector.py</text>
-                            <text x="325" y="84" text-anchor="middle" font-size="12" fill="#ffffffcc">vision module</text>
+                    <rect x="240" y="40" width="170" height="60" rx="14" fill="#F5821F" />
+                    <text x="325" y="66" text-anchor="middle" font-size="14" font-weight="bold" fill="white">aruco_detector.py</text>
+                    <text x="325" y="84" text-anchor="middle" font-size="12" fill="#ffffffcc">vision module</text>
 
-                            <rect x="480" y="40" width="180" height="60" rx="10" fill="#F5821F" />
-                            <text x="570" y="66" text-anchor="middle" font-size="14" font-weight="bold" fill="white">ibvs_controller.py</text>
-                            <text x="570" y="84" text-anchor="middle" font-size="12" fill="#ffffffcc">state machine + PIDs</text>
+                    <rect x="480" y="40" width="180" height="60" rx="14" fill="#F5821F" />
+                    <text x="570" y="66" text-anchor="middle" font-size="14" font-weight="bold" fill="white">ibvs_controller.py</text>
+                    <text x="570" y="84" text-anchor="middle" font-size="12" fill="#ffffffcc">state machine + PIDs</text>
 
-                            <rect x="730" y="40" width="110" height="60" rx="10" fill="#eeeeee" stroke="#bbb" />
-                            <text x="785" y="75" text-anchor="middle" font-size="14" font-weight="bold" fill="#363636">mavros</text>
+                    <rect x="730" y="40" width="110" height="60" rx="14" fill="#f1ece6" stroke="#d8cec4" />
+                    <text x="785" y="75" text-anchor="middle" font-size="14" font-weight="bold" fill="#33291f">mavros</text>
 
-                            <rect x="880" y="40" width="85" height="60" rx="10" fill="#eeeeee" stroke="#bbb" />
-                            <text x="922" y="66" text-anchor="middle" font-size="13" font-weight="bold" fill="#363636">ArduPilot</text>
-                            <text x="922" y="84" text-anchor="middle" font-size="12" fill="#666">SITL</text>
+                    <rect x="880" y="40" width="85" height="60" rx="14" fill="#f1ece6" stroke="#d8cec4" />
+                    <text x="922" y="66" text-anchor="middle" font-size="13" font-weight="bold" fill="#33291f">ArduPilot</text>
+                    <text x="922" y="84" text-anchor="middle" font-size="12" fill="#7d7168">SITL</text>
 
-                            <line x1="170" y1="70" x2="238" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
-                            <text x="204" y="58" text-anchor="middle" font-size="10.5" fill="#666">image_raw</text>
+                    <line x1="170" y1="70" x2="238" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
+                    <text x="204" y="58" text-anchor="middle" font-size="10.5" fill="#7d7168">image_raw</text>
 
-                            <line x1="410" y1="70" x2="478" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
-                            <text x="444" y="50" text-anchor="middle" font-size="10.5" fill="#c2560d" font-weight="bold">ibvs/</text>
-                            <text x="444" y="62" text-anchor="middle" font-size="10.5" fill="#c2560d" font-weight="bold">target_point</text>
+                    <line x1="410" y1="70" x2="478" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
+                    <text x="444" y="50" text-anchor="middle" font-size="10.5" fill="#c2560d" font-weight="bold">ibvs/</text>
+                    <text x="444" y="62" text-anchor="middle" font-size="10.5" fill="#c2560d" font-weight="bold">target_point</text>
 
-                            <line x1="660" y1="70" x2="728" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
-                            <text x="694" y="50" text-anchor="middle" font-size="10.5" fill="#666">setpoint_raw/</text>
-                            <text x="694" y="62" text-anchor="middle" font-size="10.5" fill="#666">attitude</text>
+                    <line x1="660" y1="70" x2="728" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
+                    <text x="694" y="50" text-anchor="middle" font-size="10.5" fill="#7d7168">setpoint_raw/</text>
+                    <text x="694" y="62" text-anchor="middle" font-size="10.5" fill="#7d7168">attitude</text>
 
-                            <line x1="840" y1="70" x2="878" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
-                            <text x="859" y="58" text-anchor="middle" font-size="10.5" fill="#666">MAVLink</text>
+                    <line x1="840" y1="70" x2="878" y2="70" stroke="#888" stroke-width="2" marker-end="url(#arrow)" />
+                    <text x="859" y="58" text-anchor="middle" font-size="10.5" fill="#7d7168">MAVLink</text>
 
-                            <!-- row 2: manual flight path -->
-                            <rect x="240" y="220" width="170" height="60" rx="10" fill="#F5821F" />
-                            <text x="325" y="246" text-anchor="middle" font-size="14" font-weight="bold" fill="white">keyboard_rc.py</text>
-                            <text x="325" y="264" text-anchor="middle" font-size="12" fill="#ffffffcc">simulated RC transmitter</text>
+                    <!-- row 2: manual flight path -->
+                    <rect x="240" y="220" width="170" height="60" rx="14" fill="#F5821F" />
+                    <text x="325" y="246" text-anchor="middle" font-size="14" font-weight="bold" fill="white">keyboard_rc.py</text>
+                    <text x="325" y="264" text-anchor="middle" font-size="12" fill="#ffffffcc">simulated RC transmitter</text>
 
-                            <rect x="480" y="220" width="180" height="60" rx="10" fill="#F5821F" />
-                            <text x="570" y="246" text-anchor="middle" font-size="14" font-weight="bold" fill="white">rc_to_joy</text>
-                            <text x="570" y="264" text-anchor="middle" font-size="12" fill="#ffffffcc">RC &rarr; /joy bridge</text>
+                    <rect x="480" y="220" width="180" height="60" rx="14" fill="#F5821F" />
+                    <text x="570" y="246" text-anchor="middle" font-size="14" font-weight="bold" fill="white">rc_to_joy</text>
+                    <text x="570" y="264" text-anchor="middle" font-size="12" fill="#ffffffcc">RC &rarr; /joy bridge</text>
 
-                            <line x1="410" y1="250" x2="740" y2="250" stroke="#888" stroke-width="0" />
-                            <path d="M 410 250 L 785 250 L 785 102" stroke="#888" stroke-width="2" fill="none"
-                                marker-end="url(#arrow)" />
-                            <text x="470" y="238" text-anchor="middle" font-size="10.5" fill="#666">rc/override</text>
+                    <path d="M 410 250 L 785 250 L 785 102" stroke="#888" stroke-width="2" fill="none"
+                        marker-end="url(#arrow)" />
+                    <text x="470" y="238" text-anchor="middle" font-size="10.5" fill="#7d7168">rc/override</text>
 
-                            <path d="M 730 90 L 700 90 L 700 190 L 570 190 L 570 218" stroke="#888" stroke-width="2"
-                                fill="none" marker-end="url(#arrow)" />
-                            <text x="648" y="182" text-anchor="middle" font-size="10.5" fill="#666">rc/in</text>
+                    <path d="M 730 90 L 700 90 L 700 190 L 570 190 L 570 218" stroke="#888" stroke-width="2"
+                        fill="none" marker-end="url(#arrow)" />
+                    <text x="648" y="182" text-anchor="middle" font-size="10.5" fill="#7d7168">rc/in</text>
 
-                            <path d="M 480 250 L 440 250" stroke="#888" stroke-width="2" fill="none"
-                                marker-end="url(#arrow)" transform="translate(0,60)" opacity="0" />
+                    <!-- services arrow: keyboard -> controller -->
+                    <path d="M 325 220 L 325 130 L 480 110" stroke="#c2560d" stroke-width="2" fill="none"
+                        stroke-dasharray="6 4" marker-end="url(#arrow)" />
+                    <text x="330" y="150" text-anchor="start" font-size="10.5" fill="#c2560d" font-weight="bold">
+                        ibvs/start &nbsp;('i' key = IBVS button)</text>
 
-                            <!-- services arrow: keyboard -> controller -->
-                            <path d="M 325 220 L 325 130 L 480 110" stroke="#c2560d" stroke-width="2" fill="none"
-                                stroke-dasharray="6 4" marker-end="url(#arrow)" />
-                            <text x="330" y="150" text-anchor="start" font-size="10.5" fill="#c2560d" font-weight="bold">
-                                ibvs/start &nbsp;('i' key = IBVS button)</text>
+                    <!-- legend -->
+                    <rect x="20" y="320" width="14" height="14" rx="4" fill="#F5821F" />
+                    <text x="42" y="332" font-size="12" fill="#7d7168">this package</text>
+                    <rect x="150" y="320" width="14" height="14" rx="4" fill="#f1ece6" stroke="#d8cec4" />
+                    <text x="172" y="332" font-size="12" fill="#7d7168">external (Gazebo / mavros / ArduPilot)</text>
+                    <line x1="420" y1="327" x2="460" y2="327" stroke="#c2560d" stroke-width="2" stroke-dasharray="6 4" />
+                    <text x="470" y="332" font-size="12" fill="#7d7168">ROS service call</text>
+                </svg>
+            </div>
+            <p class="figure-caption">
+                Everything runs inside the <code>/red</code> UAV namespace. The pilot flies through
+                <span class="topic-tag">mavros/rc/override</span>; the controller flies through
+                <span class="topic-tag">mavros/setpoint_raw/attitude</span>. Pressing the IBVS button hands control
+                from one path to the other.
+            </p>
 
-                            <!-- legend -->
-                            <rect x="20" y="320" width="14" height="14" rx="3" fill="#F5821F" />
-                            <text x="42" y="332" font-size="12" fill="#666">this package</text>
-                            <rect x="150" y="320" width="14" height="14" rx="3" fill="#eeeeee" stroke="#bbb" />
-                            <text x="172" y="332" font-size="12" fill="#666">external (Gazebo / mavros / ArduPilot)</text>
-                            <line x1="420" y1="327" x2="460" y2="327" stroke="#c2560d" stroke-width="2" stroke-dasharray="6 4" />
-                            <text x="470" y="332" font-size="12" fill="#666">ROS service call</text>
-                        </svg>
-                    </div>
-                    <p class="figure-caption">
-                        Everything runs inside the <code>/red</code> UAV namespace. The pilot flies through
-                        <span class="topic-tag">mavros/rc/override</span>; the controller flies through
-                        <span class="topic-tag">mavros/setpoint_raw/attitude</span>. Pressing the IBVS button hands
-                        control from one path to the other.
-                    </p>
-
-                    <div class="content has-text-justified" style="max-width: 760px; margin: 1.5rem auto 0;">
-                        <p>
-                            The two paths never fight each other: RC sticks matter in the manual modes
-                            (<code>STABILIZE</code>, <code>ALT_HOLD</code>, <code>LOITER</code>), attitude setpoints
-                            matter only in <code>GUIDED_NOGPS</code>. Switching the flight mode <em>is</em> the
-                            handover — and the safety pilot can always take the mode back.
-                        </p>
-                    </div>
-                </div>
+            <div class="container narrow prose" style="margin-top: 1.4rem;">
+                <p>
+                    The two paths never fight each other: RC sticks matter in the manual modes
+                    (<code>STABILIZE</code>, <code>ALT_HOLD</code>, <code>LOITER</code>), attitude setpoints matter
+                    only in <code>GUIDED_NOGPS</code>. Switching the flight mode <em>is</em> the handover — and the
+                    safety pilot can always take the mode back.
+                </p>
             </div>
         </div>
     </section>
 
     <!-- Documentation cards -->
-    <section class="section hero is-light" id="docs">
-        <div class="container is-max-desktop">
-            <div class="columns is-centered has-text-centered">
-                <div class="column is-full">
-                    <h2 class="title is-3">Documentation</h2>
+    <section class="section" id="docs">
+        <div class="container">
+            <span class="overline">Documentation</span>
+            <h2 class="section-title">Pick a page</h2>
 
-                    <div class="columns is-multiline is-centered" style="margin-top: 2rem;">
-                        <div class="column is-half">
-                            <div class="box doc-card">
-                                <p class="heading"><i class="fas fa-rocket"></i>&nbsp; GETTING STARTED</p>
-                                <h3 class="title is-5" style="margin-top: 0.5rem;">Running the simulation</h3>
-                                <p class="content card-body">
-                                    One command starts the whole world: Gazebo, ArduPilot SITL, mavros, the detector and
-                                    the controller in a tmux session. A guided tour of every window, the two ways to
-                                    fly a mission, and what you should see on screen.
-                                </p>
-                                <a href="simulation.html" class="button is-fullwidth">
-                                    <span class="icon"><i class="fas fa-arrow-right"></i></span>
-                                    <span>Read the guide</span>
-                                </a>
-                            </div>
-                        </div>
+            <div class="grid">
+                <div class="card">
+                    <div class="card-icon"><i class="fas fa-rocket"></i></div>
+                    <h3>Running the simulation</h3>
+                    <p>One command starts the whole world: Gazebo, ArduPilot SITL, mavros, the detector and the
+                        controller in a tmux session. A guided tour of every window, the two ways to fly a mission,
+                        and what you should see on screen.</p>
+                    <a class="btn btn-primary" href="simulation.html">Read the guide <i class="fas fa-arrow-right"></i></a>
+                </div>
 
-                        <div class="column is-half">
-                            <div class="box doc-card">
-                                <p class="heading"><i class="fas fa-gamepad"></i>&nbsp; MANUAL FLIGHT</p>
-                                <h3 class="title is-5" style="margin-top: 0.5rem;">Flying with the keyboard joystick</h3>
-                                <p class="content card-body">
-                                    The keyboard becomes an RC transmitter: arrows for roll/pitch,
-                                    <span class="kbd is-small">W</span><span class="kbd is-small">S</span> for
-                                    altitude, and <span class="kbd is-small is-orange">I</span> as the IBVS button that
-                                    hands control to the perching controller. Every key explained, with pictures.
-                                </p>
-                                <a href="joystick.html" class="button is-fullwidth">
-                                    <span class="icon"><i class="fas fa-arrow-right"></i></span>
-                                    <span>Learn the keys</span>
-                                </a>
-                            </div>
-                        </div>
+                <div class="card">
+                    <div class="card-icon"><i class="fas fa-gamepad"></i></div>
+                    <h3>Flying with the keyboard</h3>
+                    <p>The keyboard becomes an RC transmitter: arrows for roll and pitch,
+                        <span class="kbd sm">W</span><span class="kbd sm">S</span> for altitude, and
+                        <span class="kbd sm orange">I</span> as the IBVS button that hands control to the perching
+                        controller. Every key explained, with pictures.</p>
+                    <a class="btn btn-primary" href="joystick.html">Learn the keys <i class="fas fa-arrow-right"></i></a>
+                </div>
 
-                        <div class="column is-half">
-                            <div class="box doc-card">
-                                <p class="heading"><i class="fas fa-project-diagram"></i>&nbsp; HOW IT WORKS</p>
-                                <h3 class="title is-5" style="margin-top: 0.5rem;">The IBVS controller</h3>
-                                <p class="content card-body">
-                                    The seven-state machine, why ArduPilot's "thrust" field is actually a climb rate,
-                                    the tilt-cascade control law that keeps the vehicle stable, and a full reference of
-                                    every tuning parameter.
-                                </p>
-                                <a href="controller.html" class="button is-fullwidth">
-                                    <span class="icon"><i class="fas fa-arrow-right"></i></span>
-                                    <span>Go deeper</span>
-                                </a>
-                            </div>
-                        </div>
+                <div class="card">
+                    <div class="card-icon"><i class="fas fa-diagram-project"></i></div>
+                    <h3>The IBVS controller</h3>
+                    <p>The seven-state machine, why ArduPilot's "thrust" field is actually a climb rate, the
+                        tilt-cascade control law that keeps the vehicle stable, and a full reference of every tuning
+                        parameter.</p>
+                    <a class="btn btn-primary" href="controller.html">Go deeper <i class="fas fa-arrow-right"></i></a>
+                </div>
 
-                        <div class="column is-half">
-                            <div class="box doc-card">
-                                <p class="heading"><i class="fas fa-code"></i>&nbsp; REFERENCE</p>
-                                <h3 class="title is-5" style="margin-top: 0.5rem;">Code walkthrough</h3>
-                                <p class="content card-body">
-                                    Every file in the package and what it is for — nodes, launch files, configuration,
-                                    the Gazebo tag model and the custom camera URDF — each linked straight to the
-                                    source on GitHub.
-                                </p>
-                                <a href="code.html" class="button is-fullwidth">
-                                    <span class="icon"><i class="fas fa-arrow-right"></i></span>
-                                    <span>Browse the files</span>
-                                </a>
-                            </div>
-                        </div>
-                    </div>
+                <div class="card">
+                    <div class="card-icon"><i class="fas fa-code"></i></div>
+                    <h3>Code walkthrough</h3>
+                    <p>Every file in the package and what it is for — nodes, launch files, configuration, the Gazebo
+                        tag model and the custom camera URDF — each linked straight to the source on GitHub.</p>
+                    <a class="btn btn-primary" href="code.html">Browse the files <i class="fas fa-arrow-right"></i></a>
                 </div>
             </div>
         </div>
     </section>
 
     <!-- Mission at a glance -->
-    <section class="section">
-        <div class="container is-max-desktop">
-            <div class="columns is-centered has-text-centered">
-                <div class="column is-four-fifths">
-                    <h2 class="title is-3">A mission at a glance</h2>
-                    <div class="content has-text-justified" style="margin-top: 1.5rem;">
-                        <p>The intended flow — identical in simulation and (soon) in the field:</p>
-                    </div>
+    <section class="section alt">
+        <div class="container narrow">
+            <span class="overline">Workflow</span>
+            <h2 class="section-title">A mission at a glance</h2>
+            <p class="prose">The intended flow — identical in simulation and (soon) in the field:</p>
 
-                    <div style="margin-top: 1.5rem;">
-                        <div class="step">
-                            <div class="step-number">1</div>
-                            <div class="step-body"><strong>Fly manually.</strong> The pilot arms and flies the vehicle
-                                with the joystick (keyboard in simulation, RC transmitter in the field). The controller
-                                is already running, but its setpoints are ignored in manual modes.</div>
-                        </div>
-                        <div class="step">
-                            <div class="step-number">2</div>
-                            <div class="step-body"><strong>Find the target.</strong> The down-facing camera picks up
-                                the ArUco marker and the vision module starts publishing
-                                <span class="topic-tag">ibvs/target_point</span>. Nothing takes over yet — seeing the
-                                tag alone never grabs control.</div>
-                        </div>
-                        <div class="step">
-                            <div class="step-number">3</div>
-                            <div class="step-body"><strong>Press the IBVS button</strong>
-                                (<span class="kbd is-small is-orange">I</span> in simulation). The next tag detection
-                                engages: the controller switches the flight mode to <code>GUIDED_NOGPS</code> by itself
-                                and starts servoing — no <code>position_hold</code> handshake, no extra services.</div>
-                        </div>
-                        <div class="step">
-                            <div class="step-number">4</div>
-                            <div class="step-body"><strong>Watch it align and descend.</strong> The controller centers
-                                the marker, then descends toward it while a safety gate keeps the descent centered.
-                                The pilot can take back control at any moment with the mode switch — the controller
-                                never steals the mode back on its own.</div>
-                        </div>
-                    </div>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-num">1</div>
+                    <div class="step-body"><strong>Fly manually.</strong> The pilot arms and flies the vehicle with
+                        the joystick (keyboard in simulation, RC transmitter in the field). The controller is already
+                        running, but its setpoints are ignored in manual modes.</div>
                 </div>
+                <div class="step">
+                    <div class="step-num">2</div>
+                    <div class="step-body"><strong>Find the target.</strong> The down-facing camera picks up the ArUco
+                        marker and the vision module starts publishing
+                        <span class="topic-tag">ibvs/target_point</span>. Nothing takes over yet — seeing the tag
+                        alone never grabs control.</div>
+                </div>
+                <div class="step">
+                    <div class="step-num">3</div>
+                    <div class="step-body"><strong>Press the IBVS button</strong>
+                        (<span class="kbd sm orange">I</span> in simulation). The next tag detection engages: the
+                        controller switches the flight mode to <code>GUIDED_NOGPS</code> by itself and starts
+                        servoing — no <code>position_hold</code> handshake, no extra services.</div>
+                </div>
+                <div class="step">
+                    <div class="step-num">4</div>
+                    <div class="step-body"><strong>Watch it align and descend.</strong> The controller centers the
+                        marker, then descends toward it while a safety gate keeps the descent centered. The pilot can
+                        take back control at any moment with the mode switch — the controller never steals the mode
+                        back on its own.</div>
+                </div>
+            </div>
+
+            <div class="hero-actions" style="justify-content: flex-start; margin-top: 1.6rem;">
+                <a class="btn btn-primary" href="simulation.html"><i class="fas fa-rocket"></i> Try it in simulation</a>
+                <a class="btn btn-light" href="controller.html"><i class="fas fa-diagram-project"></i> How the handover works</a>
             </div>
         </div>
     </section>
 
     <!-- Acknowledgment -->
-    <section class="section hero is-light">
-        <div class="container is-max-desktop">
-            <div class="columns is-centered has-text-centered">
-                <div class="column is-four-fifths">
-                    <h2 class="title is-3">Acknowledgment</h2>
-                    <div class="content has-text-justified" style="margin-top: 1.5rem;">
-                        <p>This work was supported in part by the project <strong>"CBRNe HERO"</strong> funded by the
-                            European Union — NextGeneration EU under Grant <strong>NPOO.C3.2.R3-I1.04.0075</strong>. The
-                            work of doctoral student <strong>Jakob Domislovic</strong> has been supported in part by the
-                            <strong>"Young researchers' career development project — training of doctoral
-                                students"</strong> of the Croatian Science Foundation funded by the European Union from
-                            the European Social Fund.</p>
-                    </div>
-                </div>
-            </div>
+    <section class="section">
+        <div class="container narrow prose">
+            <span class="overline">Funding</span>
+            <h2 class="section-title">Acknowledgment</h2>
+            <p>This work was supported in part by the project <strong>"CBRNe HERO"</strong> funded by the European
+                Union — NextGeneration EU under Grant <strong>NPOO.C3.2.R3-I1.04.0075</strong>. The work of doctoral
+                student <strong>Jakob Domislovic</strong> has been supported in part by the <strong>"Young
+                    researchers' career development project — training of doctoral students"</strong> of the Croatian
+                Science Foundation funded by the European Union from the European Social Fund.</p>
         </div>
     </section>
 
     <!-- Contact -->
-    <section class="section">
-        <div class="container is-max-desktop">
-            <div class="columns is-centered has-text-centered">
-                <div class="column is-four-fifths">
-                    <h2 class="title is-3">Contact</h2>
-                    <div class="content has-text-justified" style="margin-top: 1.5rem;">
-                        <p>For questions or collaborations:</p>
-                        <p>
-                            <strong style="font-size: 1.1rem;">Jakob Domislovic</strong><br>
-                            <a href="mailto:jakob.domislovic@fer.unizg.hr"
-                                style="color: #F5821F; font-weight: bold; text-decoration: none;">jakob.domislovic@fer.unizg.hr</a>
-                        </p>
-                        <p style="margin-top: 1rem; font-size: 0.95rem; color: #666;">
-                            Laboratory for Robotics and Intelligent Control Systems (LARICS)<br>
-                            University of Zagreb Faculty of Electrical Engineering and Computing<br>
-                            Unska 3, 10000 Zagreb, Croatia
-                        </p>
-                    </div>
-                </div>
+    <section class="section alt">
+        <div class="container narrow prose">
+            <span class="overline">Get in touch</span>
+            <h2 class="section-title">Contact</h2>
+            <p>
+                <strong style="font-size: 1.1rem;">Jakob Domislovic</strong><br>
+                Laboratory for Robotics and Intelligent Control Systems (LARICS)<br>
+                University of Zagreb Faculty of Electrical Engineering and Computing<br>
+                Unska 3, 10000 Zagreb, Croatia
+            </p>
+            <div class="hero-actions" style="justify-content: flex-start; margin-top: 1.4rem;">
+                <a class="btn btn-primary" href="mailto:jakob.domislovic@fer.unizg.hr"><i
+                        class="fas fa-envelope"></i> jakob.domislovic@fer.unizg.hr</a>
             </div>
         </div>
     </section>
 
     <!-- Footer -->
-    <footer class="footer lab-footer">
-        <div class="container">
-            <div class="columns is-centered">
-                <div class="column is-8">
-                    <div class="content has-text-centered">
-                        <div class="columns is-centered" style="margin-bottom: 1.5rem; gap: 1rem;">
-                            <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
-                                <img src="./logo/FER_logo.png" alt="FER" style="height: 120px; width: auto; opacity: 0.9;" />
-                            </div>
-                            <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
-                                <img src="./logo/Larics_logo.png" alt="LARICS" style="height: 50px; width: auto; opacity: 0.9;" />
-                            </div>
-                        </div>
-                        <p style="margin-bottom: 1rem;">
-                            <strong>ibvs_perching — Image-Based Visual Servoing for UAV Perching</strong><br>
-                            &copy; 2026 Jakob Domislovic | University of Zagreb
-                        </p>
-                        <p style="font-size: 0.9rem; opacity: 0.9;">
-                            Laboratory for Robotics and Intelligent Control Systems (LARICS)<br>
-                            <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank">GitHub
-                                Repository</a>
-                        </p>
-                    </div>
-                </div>
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-logos">
+                <div class="logo-chip"><img src="./logo/FER_logo.png" alt="FER" style="height: 84px; width: auto;"></div>
+                <div class="logo-chip"><img src="./logo/Larics_logo.png" alt="LARICS" style="height: 42px; width: auto;"></div>
             </div>
+            <p><strong>IBVS Perching</strong> — Image-Based Visual Servoing for UAV Perching</p>
+            <p class="fine">
+                &copy; 2026 Jakob Domislovic · University of Zagreb · LARICS<br>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i>
+                    GitHub Repository</a>
+            </p>
         </div>
     </footer>
 
