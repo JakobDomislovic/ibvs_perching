@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="description" content="ibvs_perching — code walkthrough: every node, launch file, config and model in the package, explained.">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Code walkthrough — ibvs_perching</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/js/all.min.js"></script>
+</head>
+
+<body>
+
+    <nav class="doc-nav">
+        <div class="container is-max-desktop">
+            <a href="index.html"><i class="fas fa-home"></i> Home</a>
+            <a href="simulation.html">Running the simulation</a>
+            <a href="joystick.html">Keyboard joystick</a>
+            <a href="controller.html">The controller</a>
+            <a href="code.html" class="is-active">Code walkthrough</a>
+        </div>
+    </nav>
+
+    <section class="hero lab-hero">
+        <div class="hero-body" style="padding: 2.5rem 1.5rem;">
+            <div class="container is-max-desktop has-text-centered">
+                <h1 class="title is-2">Code walkthrough</h1>
+                <p class="subtitle is-5">Every file in the package and what it is for</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Nodes -->
+    <section class="section">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">Nodes — <code>scripts/</code></h2>
+
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr>
+                        <th style="width: 26%;">File</th>
+                        <th>What it does</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>
+                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/scripts/ibvs_controller.py"
+                                target="_blank"><code>ibvs_controller.py</code></a>
+                        </td>
+                        <td>
+                            <strong>The controller — the heart of the package.</strong> A modal state machine
+                            (<a href="controller.html">explained in depth here</a>) that streams
+                            <span class="topic-tag">mavros/setpoint_raw/attitude</span> at 30&nbsp;Hz: body rates from a
+                            tilt cascade laterally, a climb-rate command vertically. Subscribes to
+                            <span class="topic-tag">ibvs/target_point</span> (the vision interface),
+                            <span class="topic-tag">mavros/state</span> and odometry; offers the
+                            <code>ibvs/takeoff</code> / <code>ibvs/start</code> / <code>ibvs/stop</code> services;
+                            publishes its state on <span class="topic-tag">ibvs/state</span> (latched). Handles the
+                            mid-flight engagement (button-gated mode grab) and all the safety fallbacks: position hold,
+                            tag-loss hold, pilot-takeover one-shot.
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/scripts/aruco_detector.py"
+                                target="_blank"><code>aruco_detector.py</code></a>
+                        </td>
+                        <td>
+                            <strong>The shipped vision module.</strong> Subscribes to
+                            <span class="topic-tag">camera/color/image_raw</span> +
+                            <span class="topic-tag">camera/color/camera_info</span>, detects a 4×4 ArUco marker
+                            (dictionary <code>DICT_4X4_50</code>, id 0) with OpenCV at 15&nbsp;Hz, and publishes the
+                            marker center as a normalized image point + depth on
+                            <span class="topic-tag">ibvs/target_point</span>. Draws the detection into
+                            <span class="topic-tag">ibvs/debug_image</span> for the operator. Any node that publishes
+                            the same topic contract can replace it — the controller never knows the difference.
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/scripts/keyboard_rc.py"
+                                target="_blank"><code>keyboard_rc.py</code></a>
+                        </td>
+                        <td>
+                            <strong>Simulated RC transmitter</strong> (<a href="joystick.html">full guide</a>). Turns
+                            keypresses into spring-loaded stick deflections on
+                            <span class="topic-tag">mavros/rc/override</span>, switches flight modes and arms through
+                            the mavros services, and exposes the IBVS button
+                            (<span class="kbd is-small is-orange">I</span> / <span class="kbd is-small">K</span> →
+                            <code>ibvs/start</code> / <code>ibvs/stop</code>). Sets ArduPilot's
+                            <code>SYSID_MYGCS = 1</code> at startup so the overrides are accepted. Simulation-only.
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/scripts/mock_ar_tag_publisher.py"
+                                target="_blank"><code>mock_ar_tag_publisher.py</code></a>
+                        </td>
+                        <td>
+                            <strong>Camera-free vision mock.</strong> Computes where a tag at a known world position
+                            would appear in the down-facing camera from odometry alone, and publishes the same
+                            <span class="topic-tag">ibvs/target_point</span> contract. Launch with
+                            <code>use_mock_tag:=true</code> to test the controller without rendering, detection, or
+                            lighting effects — useful for isolating control problems from vision problems.
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/scripts/rc_to_joy.py"
+                                target="_blank"><code>rc_to_joy.py</code></a>
+                        </td>
+                        <td>
+                            <strong>Fallback RC→joy bridge.</strong> A drop-in Python port of
+                            <code>uav_ros_general</code>'s <code>rc_to_joy</code> node (median-filtered sticks,
+                            deadzones, the LARICS joy axis layout). The startups use the original stack node — this
+                            copy exists only so the package can run on a machine without <code>uav_ros_stack</code>.
+                            Not launched by default.
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Launch files -->
+    <section class="section hero is-light">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">Launch files — <code>launch/</code></h2>
+
+            <div class="content">
+                <h3 class="title is-4">
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/launch/ibvs_perching.launch"
+                        target="_blank"><code>ibvs_perching.launch</code></a> — the main launch
+                </h3>
+                <p>Starts the controller and one vision module inside the UAV namespace, and (in simulation) spawns
+                    the tag model in Gazebo. No tracker, no control manager — the controller talks to mavros
+                    directly.</p>
+            </div>
+
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr><th style="width:22%;">Argument</th><th style="width:20%;">Default</th><th>Meaning</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>namespace</code></td><td><code>$UAV_NAMESPACE</code></td><td>UAV namespace (<code>red</code> in all startups).</td></tr>
+                    <tr><td><code>config</code></td><td><code>config/ibvs_params.yaml</code></td><td>Controller parameter file — the real-world startup passes its own.</td></tr>
+                    <tr><td><code>use_mock_tag</code></td><td><code>false</code></td><td><code>true</code> replaces the ArUco detector with the odometry-based mock.</td></tr>
+                    <tr><td><code>spawn_ar_tag</code></td><td><code>true</code></td><td>Spawn the tag model in Gazebo (<code>false</code> in the real world).</td></tr>
+                    <tr><td><code>ar_tag_x / ar_tag_y</code></td><td><code>0 / 0</code></td><td>Where the tag is placed on the floor.</td></tr>
+                </tbody>
+            </table>
+
+            <div class="content" style="margin-top: 2rem;">
+                <h3 class="title is-4">
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/launch/mavros_apm.launch"
+                        target="_blank"><code>mavros_apm.launch</code></a> — mavros bringup (real world)
+                </h3>
+                <p>A self-contained merge of <code>uav_ros_general</code>'s <code>apm2.launch</code> +
+                    <code>mavros_node.launch</code>: starts <code>mavros_node</code> against the flight controller
+                    serial port (<code>fcu_url</code>), loading the package-local
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/apm_config.yaml"
+                        target="_blank"><code>apm_config.yaml</code></a> and the stock ArduPilot plugin lists. Exists
+                    so the aircraft needs only <code>mavros</code> itself, not the whole uav_ros_stack. (The
+                    simulation uses <code>ardupilot_gazebo</code>'s own mavros launch instead.)</p>
+
+                <h3 class="title is-4" style="margin-top: 2rem;">
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/launch/rc_to_joy.launch"
+                        target="_blank"><code>rc_to_joy.launch</code></a>
+                </h3>
+                <p>Launches the fallback Python RC→joy bridge with a combined channel-mapping + deadzone config. Kept
+                    for stack-less machines; the startups launch the original <code>uav_ros_general</code> node.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Config -->
+    <section class="section">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">Configuration — <code>config/</code></h2>
+
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr><th style="width:26%;">File</th><th>What it configures</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/ibvs_params.yaml"
+                                target="_blank"><code>ibvs_params.yaml</code></a></td>
+                        <td>All controller parameters for simulation — engagement flags, climb-rate limits, cascade
+                            gains, PID gains, state-machine timing. Fully documented inline and in the
+                            <a href="controller.html">parameter reference</a>.</td>
+                    </tr>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/apm_config.yaml"
+                                target="_blank"><code>apm_config.yaml</code></a></td>
+                        <td>mavros plugin configuration for ArduPilot FCUs (copied from uav_ros_general so the package
+                            is self-contained). Used by <code>mavros_apm.launch</code> in the real world.</td>
+                    </tr>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/rc_to_joy.yaml"
+                                target="_blank"><code>rc_to_joy.yaml</code></a></td>
+                        <td>Default RC channel mapping + stick deadzones for the fallback bridge.</td>
+                    </tr>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/plotjuggler_ibvs.xml"
+                                target="_blank"><code>plotjuggler_ibvs.xml</code></a></td>
+                        <td>Ready-made PlotJuggler layout: commanded body rates and climb rate, target-point error, and
+                            altitude — everything needed to judge a run at a glance.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Sim assets -->
+    <section class="section hero is-light">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">Simulation assets — <code>urdf/</code> &amp; <code>models/</code></h2>
+
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr><th style="width:30%;">File</th><th>What it is</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/urdf/kopterworx_downcam.urdf.xacro"
+                                target="_blank"><code>kopterworx_downcam.urdf.xacro</code></a></td>
+                        <td>The kopterworx quadrotor with a <strong>custom down-facing camera mount</strong>: the
+                            camera sits directly under the base looking straight down, with image right = body
+                            forward. The stock <code>down_facing_camera</code> hangs 0.3&nbsp;m below and 0.2&nbsp;m to
+                            the side — it would physically touch the tag at the 0.5&nbsp;m standoff, and its offset
+                            breaks the controller's camera-to-body assumption.</td>
+                    </tr>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/tree/master/models/ar_tag"
+                                target="_blank"><code>models/ar_tag/</code></a></td>
+                        <td>Gazebo model of the target: a 40×40&nbsp;cm plate carrying a 30&nbsp;cm ArUco marker
+                            (<code>DICT_4X4_50</code>, id 0) as a texture. Spawned on the floor at the world origin by
+                            the main launch. The package exports its <code>models/</code> directory to Gazebo so the
+                            texture resolves.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Startups -->
+    <section class="section">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">Startups — <code>startup/</code></h2>
+
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr><th style="width:30%;">Folder</th><th>What it starts</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/tree/master/startup/sim_ibvs"
+                                target="_blank"><code>startup/sim_ibvs/</code></a></td>
+                        <td>The simulation session — Gazebo + SITL + mavros + controller + joystick, toured window by
+                            window in the <a href="simulation.html">simulation guide</a>.</td>
+                    </tr>
+                    <tr>
+                        <td><a href="https://github.com/JakobDomislovic/ibvs_perching/tree/master/startup/real_world"
+                                target="_blank"><code>startup/real_world/</code></a></td>
+                        <td>The field session: mavros against the real FCU (<code>mavros_apm.launch</code>, serial
+                            port and RC mapping set per-aircraft in <code>rw_setup.sh</code> /
+                            <code>custom_config/</code>), the standard <code>uav_ros_general</code> RC→joy bridge
+                            (exactly as in the lab's other aircraft), a camera-driver slot, and the controller with
+                            <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/startup/real_world/custom_config/ibvs_params_rw.yaml"
+                                target="_blank">real-world parameters</a>. Same engagement workflow as simulation:
+                            fly manually, press the button, the next detection takes over. Includes package-local
+                            copies of the <code>waitForRos</code>-style shell helpers so the aircraft does not need
+                            the uav_ros_stack shell additions.</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="content" style="margin-top: 1.5rem;">
+                <p>Finally, <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/CMakeLists.txt"
+                        target="_blank"><code>CMakeLists.txt</code></a> /
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/package.xml"
+                        target="_blank"><code>package.xml</code></a> declare a plain Python catkin package — no
+                    compiled code, and only standard dependencies (<code>rospy</code>, <code>mavros</code>,
+                    <code>cv_bridge</code>, <code>tf</code>). The
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/README.md"
+                        target="_blank">README</a> carries the same story as these pages in text form, including the
+                    full troubleshooting section.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer lab-footer">
+        <div class="container">
+            <div class="content has-text-centered">
+                <div class="columns is-centered" style="margin-bottom: 1rem; gap: 1rem;">
+                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
+                        <img src="./logo/FER_logo.png" alt="FER" style="height: 90px; width: auto; opacity: 0.9;" />
+                    </div>
+                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
+                        <img src="./logo/Larics_logo.png" alt="LARICS" style="height: 40px; width: auto; opacity: 0.9;" />
+                    </div>
+                </div>
+                <p>&copy; 2026 Jakob Domislovic | University of Zagreb — LARICS<br>
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank">GitHub Repository</a>
+                </p>
+            </div>
+        </div>
+    </footer>
+
+</body>
+
+</html>

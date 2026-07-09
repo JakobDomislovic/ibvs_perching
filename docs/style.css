@@ -1,0 +1,387 @@
+/* ibvs_perching documentation — LARICS orange theme */
+
+:root {
+    --lab-color: #F5821F;
+    /* lab orange */
+    --lab-color-light: #F5A860;
+    --lab-color-pale: #FDEEDF;
+    --text-color: #363636;
+    --muted: #666;
+}
+
+body {
+    font-family: 'Noto Sans', sans-serif;
+    color: var(--text-color);
+    background-color: #fafafa;
+}
+
+/* ---------- section titles ---------- */
+
+.title.is-3 {
+    color: var(--text-color);
+    border-bottom: 2px solid var(--lab-color);
+    padding-bottom: 0.5rem;
+}
+
+.title.is-4 {
+    color: var(--text-color);
+}
+
+.publication-authors {
+    margin: 1rem 0;
+}
+
+.author-block {
+    display: inline-block;
+    margin: 0 0.5rem;
+}
+
+/* ---------- hero ---------- */
+
+.hero.lab-hero {
+    background: linear-gradient(135deg, #F5821F 0%, #F5A860 100%);
+    min-height: 24vh;
+}
+
+.hero.lab-hero .subtitle,
+.hero.lab-hero .title {
+    color: white;
+}
+
+.hero-button {
+    background-color: white;
+    color: var(--lab-color);
+    border: none;
+    font-weight: bold;
+}
+
+.hero-button.is-outlined {
+    background-color: rgba(255, 255, 255, 0.2);
+    color: white;
+    border: 2px solid white;
+}
+
+/* ---------- navbar on doc pages ---------- */
+
+.doc-nav {
+    background: linear-gradient(135deg, #F5821F 0%, #F5A860 100%);
+    padding: 0.75rem 1.5rem;
+}
+
+.doc-nav a {
+    color: white;
+    font-weight: 600;
+    margin-right: 1.25rem;
+    text-decoration: none;
+    opacity: 0.9;
+}
+
+.doc-nav a:hover {
+    opacity: 1;
+    text-decoration: underline;
+}
+
+.doc-nav a.is-active {
+    border-bottom: 2px solid white;
+    opacity: 1;
+}
+
+/* ---------- generic content ---------- */
+
+.content a {
+    color: var(--lab-color);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--lab-color);
+}
+
+.content a:hover {
+    border-bottom: 1px solid var(--lab-color);
+}
+
+.box {
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.box:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 4px 16px rgba(245, 130, 31, 0.2);
+}
+
+.box.is-static:hover {
+    transform: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+section.hero.is-light {
+    background-color: #f5f5f5;
+}
+
+footer.lab-footer {
+    background: linear-gradient(135deg, #F5821F 0%, #F5A860 100%);
+    padding: 3rem 1.5rem;
+}
+
+footer.lab-footer p,
+footer.lab-footer strong {
+    color: white;
+}
+
+footer.lab-footer a {
+    color: white;
+    text-decoration: underline;
+}
+
+/* ---------- doc cards on the landing page ---------- */
+
+.doc-card {
+    border-top: 5px solid var(--lab-color);
+    box-shadow: 0 4px 12px rgba(245, 130, 31, 0.15);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    text-align: left;
+}
+
+.doc-card .heading {
+    color: var(--lab-color);
+    font-weight: bold;
+}
+
+.doc-card .card-body {
+    flex-grow: 1;
+}
+
+.doc-card .button {
+    background-color: var(--lab-color);
+    color: white;
+    border: none;
+    font-weight: bold;
+}
+
+/* ---------- callouts ---------- */
+
+.callout {
+    border-left: 4px solid var(--lab-color);
+    background-color: var(--lab-color-pale);
+    padding: 1rem 1.25rem;
+    border-radius: 4px;
+    margin: 1.5rem 0;
+    text-align: left;
+}
+
+.callout.is-danger {
+    border-left-color: #cc0f35;
+    background-color: #feecf0;
+}
+
+.callout .callout-title {
+    font-weight: bold;
+    color: var(--lab-color);
+    margin-bottom: 0.35rem;
+}
+
+.callout.is-danger .callout-title {
+    color: #cc0f35;
+}
+
+/* ---------- code ---------- */
+
+pre {
+    background-color: #2d2d2d;
+    color: #f5f5f5;
+    border-radius: 6px;
+    padding: 1rem 1.25rem;
+    text-align: left;
+    overflow-x: auto;
+}
+
+pre code {
+    background: none;
+    color: inherit;
+    font-size: 0.9rem;
+}
+
+code {
+    background-color: #f0f0f0;
+    color: #c2560d;
+    border-radius: 3px;
+    padding: 0.1rem 0.35rem;
+    font-size: 0.92em;
+}
+
+.topic-tag {
+    font-family: monospace;
+    background-color: var(--lab-color-pale);
+    color: #c2560d;
+    border: 1px solid var(--lab-color-light);
+    border-radius: 4px;
+    padding: 0.05rem 0.45rem;
+    white-space: nowrap;
+}
+
+/* ---------- keyboard keycaps ---------- */
+
+.kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.4rem;
+    height: 2.4rem;
+    padding: 0 0.6rem;
+    margin: 0.15rem;
+    background: linear-gradient(180deg, #ffffff 0%, #ececec 100%);
+    border: 1px solid #bbb;
+    border-bottom: 3px solid #999;
+    border-radius: 6px;
+    box-shadow: 0 2px 3px rgba(0, 0, 0, 0.12);
+    font-family: 'Noto Sans', monospace;
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--text-color);
+    vertical-align: middle;
+}
+
+.kbd.is-orange {
+    background: linear-gradient(180deg, #F5A860 0%, #F5821F 100%);
+    border-color: #c2560d;
+    border-bottom-color: #a34608;
+    color: white;
+}
+
+.kbd.is-wide {
+    min-width: 5rem;
+}
+
+.kbd.is-small {
+    min-width: 1.9rem;
+    height: 1.9rem;
+    font-size: 0.85rem;
+}
+
+/* key cluster cards */
+
+.key-cluster {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    padding: 1.25rem 1rem;
+    text-align: center;
+    height: 100%;
+}
+
+.key-cluster .cluster-keys {
+    min-height: 6rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.key-cluster .cluster-title {
+    font-weight: bold;
+    color: var(--lab-color);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.key-cluster .cluster-desc {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 0.75rem;
+}
+
+.key-row {
+    display: flex;
+    justify-content: center;
+}
+
+/* numbered steps */
+
+.step {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 1.4rem;
+    text-align: left;
+}
+
+.step .step-number {
+    flex: 0 0 2.4rem;
+    height: 2.4rem;
+    border-radius: 50%;
+    background-color: var(--lab-color);
+    color: white;
+    font-weight: bold;
+    font-size: 1.1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 1rem;
+}
+
+.step .step-body {
+    flex: 1;
+}
+
+/* ---------- tables ---------- */
+
+.doc-table {
+    width: 100%;
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.doc-table th {
+    background-color: var(--lab-color);
+    color: white !important;
+    font-weight: bold;
+}
+
+.doc-table td {
+    vertical-align: top;
+}
+
+/* ---------- diagrams ---------- */
+
+.diagram-box {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    padding: 1.5rem;
+    overflow-x: auto;
+}
+
+.diagram-box svg {
+    max-width: 100%;
+    height: auto;
+}
+
+.figure-caption {
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+    font-style: italic;
+    text-align: center;
+}
+
+/* state badges used in text */
+
+.state-badge {
+    font-family: monospace;
+    font-size: 0.85em;
+    font-weight: bold;
+    background-color: #eee;
+    border-radius: 4px;
+    padding: 0.1rem 0.45rem;
+    white-space: nowrap;
+}
+
+.state-badge.is-active {
+    background-color: var(--lab-color);
+    color: white;
+}

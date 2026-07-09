@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="description" content="ibvs_perching — the IBVS controller in depth: state machine, control laws, engagement, parameters.">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>The IBVS controller — ibvs_perching</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/js/all.min.js"></script>
+</head>
+
+<body>
+
+    <nav class="doc-nav">
+        <div class="container is-max-desktop">
+            <a href="index.html"><i class="fas fa-home"></i> Home</a>
+            <a href="simulation.html">Running the simulation</a>
+            <a href="joystick.html">Keyboard joystick</a>
+            <a href="controller.html" class="is-active">The controller</a>
+            <a href="code.html">Code walkthrough</a>
+        </div>
+    </nav>
+
+    <section class="hero lab-hero">
+        <div class="hero-body" style="padding: 2.5rem 1.5rem;">
+            <div class="container is-max-desktop has-text-centered">
+                <h1 class="title is-2">The IBVS controller</h1>
+                <p class="subtitle is-5">One Python node: a seven-state machine wrapped around two control loops</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Vision interface -->
+    <section class="section">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">The vision-module interface</h2>
+            <div class="content">
+                <p>The controller is deliberately <strong>target-agnostic</strong>: it knows nothing about ArUco
+                    markers. Any vision module can command it by publishing the point it wants centered in the camera
+                    image on <span class="topic-tag">ibvs/target_point</span>
+                    (<code>geometry_msgs/PointStamped</code>):</p>
+            </div>
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr><th style="width:15%;">Field</th><th>Meaning</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>point.x</code></td>
+                        <td>Normalized horizontal offset from the image center, <code>(u − cx)/fx</code> — positive
+                            <em>right</em> in the image.</td>
+                    </tr>
+                    <tr>
+                        <td><code>point.y</code></td>
+                        <td>Normalized vertical offset from the image center, <code>(v − cy)/fy</code> — positive
+                            <em>down</em> in the image.</td>
+                    </tr>
+                    <tr>
+                        <td><code>point.z</code></td>
+                        <td>Distance to the target along the optical axis in meters, or <code>0.0</code> if unknown.
+                            <strong>Descent only happens with a real depth</strong>; with <code>z = 0</code> the
+                            controller centers the point while holding altitude (lateral gains are scaled by
+                            <code>depth_guess</code>).</td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="content" style="margin-top: 1rem;">
+                <p>Publishing on the topic at all means <em>“target in sight”</em> — freshness (within
+                    <code>tag_timeout</code> = 0.5&nbsp;s) drives the
+                    <span class="state-badge">TAG_IN_SIGHT</span> / <span class="state-badge">TAG_LOST</span>
+                    distinction. The camera is assumed rigidly mounted looking straight down with image right = body
+                    forward (the kopterworx down-camera mount). Swap in your own detector by publishing this one topic
+                    — see <a href="code.html">the code walkthrough</a> for the shipped ArUco implementation.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- State machine -->
+    <section class="section hero is-light">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">The state machine</h2>
+
+            <div class="diagram-box" style="margin-top: 1.5rem;">
+                <svg viewBox="0 0 920 540" xmlns="http://www.w3.org/2000/svg" font-family="Noto Sans, sans-serif">
+                    <defs>
+                        <marker id="sm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+                            orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="#888" />
+                        </marker>
+                        <marker id="sm-arrow-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+                            orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2560d" />
+                        </marker>
+                    </defs>
+
+                    <!-- WAIT_ARM -->
+                    <rect x="370" y="20" width="180" height="52" rx="10" fill="#9aa0a6" />
+                    <text x="460" y="42" text-anchor="middle" font-size="15" font-weight="bold" fill="white">WAIT_ARM</text>
+                    <text x="460" y="60" text-anchor="middle" font-size="11" fill="#ffffffdd">on the ground / manual flight</text>
+
+                    <!-- CLIMB -->
+                    <rect x="80" y="160" width="160" height="52" rx="10" fill="#F5A860" />
+                    <text x="160" y="182" text-anchor="middle" font-size="15" font-weight="bold" fill="white">CLIMB</text>
+                    <text x="160" y="200" text-anchor="middle" font-size="11" fill="#ffffffdd">takeoff to 1 m</text>
+
+                    <!-- HOVER -->
+                    <rect x="300" y="290" width="150" height="52" rx="10" fill="#F5A860" />
+                    <text x="375" y="312" text-anchor="middle" font-size="15" font-weight="bold" fill="white">HOVER</text>
+                    <text x="375" y="330" text-anchor="middle" font-size="11" fill="#ffffffdd">hold latched position</text>
+
+                    <!-- TAG_IN_SIGHT -->
+                    <rect x="510" y="290" width="170" height="52" rx="10" fill="#F5A860" />
+                    <text x="595" y="312" text-anchor="middle" font-size="15" font-weight="bold" fill="white">TAG_IN_SIGHT</text>
+                    <text x="595" y="330" text-anchor="middle" font-size="11" fill="#ffffffdd">hold; detector sees tag</text>
+
+                    <!-- ALIGN -->
+                    <rect x="300" y="430" width="150" height="52" rx="10" fill="#F5821F" />
+                    <text x="375" y="452" text-anchor="middle" font-size="15" font-weight="bold" fill="white">ALIGN</text>
+                    <text x="375" y="470" text-anchor="middle" font-size="11" fill="#ffffffdd">servo to the target</text>
+
+                    <!-- ALIGNED -->
+                    <rect x="530" y="430" width="150" height="52" rx="10" fill="#F5821F" />
+                    <text x="605" y="452" text-anchor="middle" font-size="15" font-weight="bold" fill="white">ALIGNED</text>
+                    <text x="605" y="470" text-anchor="middle" font-size="11" fill="#ffffffdd">centered &amp; settled</text>
+
+                    <!-- TAG_LOST -->
+                    <rect x="740" y="290" width="150" height="52" rx="10" fill="#9aa0a6" />
+                    <text x="815" y="312" text-anchor="middle" font-size="15" font-weight="bold" fill="white">TAG_LOST</text>
+                    <text x="815" y="330" text-anchor="middle" font-size="11" fill="#ffffffdd">hold; wait for tag</text>
+
+                    <!-- WAIT_ARM -> CLIMB -->
+                    <path d="M 370 60 L 160 110 L 160 158" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <text x="150" y="95" text-anchor="middle" font-size="11" fill="#555">ibvs/takeoff</text>
+                    <text x="150" y="109" text-anchor="middle" font-size="11" fill="#555">(mode + arm + climb)</text>
+
+                    <!-- WAIT_ARM -> ALIGN (engage) -->
+                    <path d="M 550 62 C 700 120 520 300 420 428" stroke="#c2560d" stroke-width="2.5" fill="none"
+                        stroke-dasharray="7 5" marker-end="url(#sm-arrow-o)" />
+                    <text x="660" y="150" text-anchor="middle" font-size="11.5" fill="#c2560d" font-weight="bold">ENGAGE (real world / joystick):</text>
+                    <text x="660" y="165" text-anchor="middle" font-size="11.5" fill="#c2560d">ibvs/start + fresh target point</text>
+                    <text x="660" y="180" text-anchor="middle" font-size="11.5" fill="#c2560d">→ controller takes GUIDED_NOGPS</text>
+
+                    <!-- CLIMB -> HOVER -->
+                    <path d="M 200 212 L 320 288" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <text x="215" y="255" text-anchor="middle" font-size="11" fill="#555">takeoff height</text>
+                    <text x="215" y="269" text-anchor="middle" font-size="11" fill="#555">reached</text>
+
+                    <!-- HOVER <-> TAG_IN_SIGHT -->
+                    <path d="M 450 305 L 508 305" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <path d="M 508 327 L 450 327" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <text x="479" y="286" text-anchor="middle" font-size="11" fill="#555">tag seen</text>
+                    <text x="479" y="352" text-anchor="middle" font-size="11" fill="#555">tag stale</text>
+
+                    <!-- TAG_IN_SIGHT -> ALIGN -->
+                    <path d="M 560 342 L 420 428" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <text x="465" y="390" text-anchor="middle" font-size="11" fill="#555">ibvs/start</text>
+
+                    <!-- ALIGN <-> ALIGNED -->
+                    <path d="M 450 445 L 528 445" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <path d="M 528 468 L 450 468" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <text x="489" y="426" text-anchor="middle" font-size="11" fill="#555">err &lt; 0.15 m, 2 s</text>
+                    <text x="489" y="492" text-anchor="middle" font-size="11" fill="#555">err &gt; 1.5 × tol</text>
+
+                    <!-- ALIGN/ALIGNED <-> TAG_LOST -->
+                    <path d="M 680 440 C 780 420 810 380 815 344" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <text x="800" y="405" text-anchor="middle" font-size="11" fill="#555">no tag 0.5 s</text>
+                    <path d="M 760 342 C 700 400 550 430 452 448" stroke="#888" stroke-width="2" fill="none" marker-end="url(#sm-arrow)" />
+                    <text x="600" y="408" text-anchor="middle" font-size="11" fill="#555">tag re-seen → ALIGN</text>
+                </svg>
+            </div>
+            <p class="figure-caption">
+                Global rules, always active: disarming or leaving <code>GUIDED_NOGPS</code> drops any state back to
+                <span class="state-badge">WAIT_ARM</span>; <code>ibvs/stop</code> drops any flying state back to
+                <span class="state-badge">HOVER</span>.
+            </p>
+
+            <table class="table doc-table is-fullwidth" style="margin-top: 1.5rem;">
+                <thead>
+                    <tr>
+                        <th style="width:18%;">State</th>
+                        <th style="width:32%;">Vertical command</th>
+                        <th>Lateral command</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="state-badge">WAIT_ARM</span></td>
+                        <td>hover (0.5 = zero climb rate)</td>
+                        <td>level — setpoints are ignored anyway outside GUIDED_NOGPS</td>
+                    </tr>
+                    <tr>
+                        <td><span class="state-badge">CLIMB</span></td>
+                        <td><code>climb_thrust</code> (0.52) — a gentle constant climb <em>is</em> the takeoff</td>
+                        <td>position hold at the latched takeoff point</td>
+                    </tr>
+                    <tr>
+                        <td><span class="state-badge">HOVER</span> / <span class="state-badge">TAG_IN_SIGHT</span></td>
+                        <td>hover</td>
+                        <td>position hold at the latched point</td>
+                    </tr>
+                    <tr>
+                        <td><span class="state-badge is-active">ALIGN</span> / <span class="state-badge is-active">ALIGNED</span></td>
+                        <td>PID on target depth toward the 0.5 m standoff, gated by lateral centering</td>
+                        <td>IBVS cascade on the target point (below)</td>
+                    </tr>
+                    <tr>
+                        <td><span class="state-badge">TAG_LOST</span></td>
+                        <td>hover</td>
+                        <td>position hold where the target was lost</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Thrust semantics -->
+    <section class="section" id="thrust">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">“Thrust” is a climb rate — read this once</h2>
+            <div class="content">
+                <p>The controller streams <code>mavros_msgs/AttitudeTarget</code> messages with the
+                    <code>IGNORE_ATTITUDE</code> mask: body rates + a <code>thrust</code> value. In
+                    <code>GUIDED_NOGPS</code>, ArduPilot does <strong>not</strong> read that thrust field as motor
+                    thrust — it reads it as a <strong>climb-rate command</strong>:</p>
+                <table class="table doc-table" style="max-width: 480px;">
+                    <thead><tr><th>thrust value</th><th>meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>0.0</code></td><td>descend at maximum rate</td></tr>
+                        <tr><td><code>0.5</code></td><td>zero climb rate — hold altitude</td></tr>
+                        <tr><td><code>1.0</code></td><td>climb at maximum rate</td></tr>
+                    </tbody>
+                </table>
+                <p>This is why <code>hover_thrust</code> is 0.5, why takeoff requires a value <em>above</em> 0.5, and
+                    why the altitude never has to be "found" by a thrust estimator — ArduPilot's own vertical loop does
+                    the work.</p>
+            </div>
+            <div class="callout is-danger">
+                <p class="callout-title"><i class="fas fa-triangle-exclamation"></i>&nbsp; The GUID_OPTIONS trap</p>
+                <p>Setting bit 3 of the ArduPilot parameter <code>GUID_OPTIONS</code> (value 8) switches the field to
+                    <em>raw thrust</em> interpretation — used by the uav_ros_stack MPC, and the default in the LARICS
+                    kopterworx parameter file. Under that interpretation this controller's hover command (0.5) is far
+                    above the real hover throttle (~0.29) and the vehicle climbs away at full rate. Both startups
+                    therefore force <code>GUID_OPTIONS 0</code> before launching.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Control laws -->
+    <section class="section hero is-light">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">The control laws</h2>
+
+            <div class="content">
+                <h3 class="title is-4">Lateral: a tilt cascade, not raw rates</h3>
+                <p>Commanding a body rate proportional to the position error is <strong>unstable</strong> — the rate
+                    integrates into an unbounded tilt (flight-tested: it flips the vehicle). The working structure is a
+                    cascade with an attitude inner loop:</p>
+                <pre><code># outer loop: PID on the target position error -> a desired tilt (clamped small)
+desired_tilt = PID_xy(target_error)                  # |tilt| ≤ max_tilt (0.15 rad)
+
+# inner loop: attitude error -> body rate (runs in EVERY flying state)
+body_rate = kp_att * (desired_tilt - current_tilt)   # |rate| ≤ max_body_rate</code></pre>
+                <p>The PID's derivative term is fed the <strong>body velocity from odometry</strong> instead of a
+                    numerical derivative of the detection (for a stationary target,
+                    <code>d(err)/dt = −velocity</code>) — the same information with far less noise. Without this
+                    damping (<code>kd</code>) the lateral oscillation outruns the shrinking camera view during descent
+                    and the tag leaves the frame.</p>
+
+                <h3 class="title is-4" style="margin-top: 2rem;">Position hold: level ≠ stationary</h3>
+                <p>Outside of servoing, "just fly level" does not hover in place: the FCU's attitude trim bias
+                    (<code>AHRS_TRIM</code>) gives a constant lateral push, and velocity damping alone only caps the
+                    resulting drift at a terminal speed. The hold states therefore latch an (x, y) position and run a
+                    small position-P + velocity-damping loop on it through the same tilt cascade — that latched point
+                    is what <span class="state-badge">HOVER</span>, <span class="state-badge">TAG_LOST</span> and
+                    <span class="state-badge">CLIMB</span> keep.</p>
+
+                <h3 class="title is-4" style="margin-top: 2rem;">Vertical: descend only while centered</h3>
+                <p>In <span class="state-badge is-active">ALIGN</span>, a PID on the target depth drives the climb-rate
+                    command toward the standoff (<code>target_z: −0.5</code> → hover 0.5&nbsp;m above the tag). A
+                    safety gate blocks any <em>descent</em> while the lateral error exceeds
+                    <code>descend_xy_gate</code> (0.25&nbsp;m): descending off-center shrinks the camera's field of
+                    view faster than the lateral loop converges, and the tag falls out of frame — flight-tested the
+                    hard way.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Engagement -->
+    <section class="section" id="engagement">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">Engagement — how the pilot hands over control</h2>
+            <div class="content">
+                <p>Two parameters (both enabled in the shipped configs) define the joystick-era workflow:</p>
+                <ul>
+                    <li><code>engage_on_target: true</code> — the controller may seize <code>GUIDED_NOGPS</code>
+                        itself when a fresh target point arrives while the vehicle is armed and flown manually, and go
+                        <em>straight</em> to <span class="state-badge is-active">ALIGN</span> (no takeoff, no
+                        <code>position_hold</code> handshake — the vehicle is already airborne).</li>
+                    <li><code>engage_needs_start: true</code> — engagement is <strong>button-gated</strong>: it only
+                        happens after <code>ibvs/start</code> is called
+                        (<span class="kbd is-small is-orange">I</span> on the keyboard joystick). Seeing the tag alone
+                        never grabs control.</li>
+                </ul>
+                <p>The software mode switch is <strong>one-shot</strong>: the moment it fires, it disarms itself.
+                    After a safety-pilot takeover (RC mode switch), the controller cannot re-take the mode no matter
+                    what the vision module publishes — control returns only when the pilot flips back to
+                    <code>GUIDED_NOGPS</code> or presses the button again. If the engaging point goes stale before the
+                    mode switch completes, the controller simply holds position
+                    (<span class="state-badge">TAG_LOST</span>) — a button press plus one empty point is effectively a
+                    position-hold command.</p>
+            </div>
+
+            <h3 class="title is-4" style="margin-top: 1.5rem;">Services</h3>
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr><th style="width:25%;">Service (std_srvs/Trigger)</th><th>Effect</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>ibvs/takeoff</code></td>
+                        <td>Autonomous mission entry: switches to <code>GUIDED_NOGPS</code>, arms, climbs to
+                            <code>takeoff_height</code>, then holds. Refused while already flying.</td>
+                    </tr>
+                    <tr>
+                        <td><code>ibvs/start</code></td>
+                        <td>Enables servoing <em>and</em> arms the one-shot engagement. Flying and the tag in sight →
+                            <span class="state-badge is-active">ALIGN</span>; flying manually → the next detection
+                            engages.</td>
+                    </tr>
+                    <tr>
+                        <td><code>ibvs/stop</code></td>
+                        <td>Stops servoing; the vehicle holds position
+                            (<span class="state-badge">HOVER</span>).</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Parameters -->
+    <section class="section hero is-light">
+        <div class="container is-max-desktop">
+            <h2 class="title is-3">Parameter reference</h2>
+            <div class="content">
+                <p>All parameters live in
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/config/ibvs_params.yaml"
+                        target="_blank"><code>config/ibvs_params.yaml</code></a> (simulation) and
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/startup/real_world/custom_config/ibvs_params_rw.yaml"
+                        target="_blank"><code>ibvs_params_rw.yaml</code></a> (real world). Values below are the
+                    current simulation tuning (v1.0).</p>
+            </div>
+
+            <table class="table doc-table is-fullwidth">
+                <thead>
+                    <tr><th style="width:22%;">Parameter</th><th style="width:12%;">Value</th><th>Meaning</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="3" style="background:#FDEEDF; font-weight:bold;">General &amp; engagement</td></tr>
+                    <tr><td><code>control_rate</code></td><td>30 Hz</td><td>AttitudeTarget publish rate.</td></tr>
+                    <tr><td><code>engage_on_target</code></td><td>true</td><td>A fresh target point may engage the controller mid-flight.</td></tr>
+                    <tr><td><code>engage_needs_start</code></td><td>true</td><td>…but only after the <code>ibvs/start</code> button.</td></tr>
+
+                    <tr><td colspan="3" style="background:#FDEEDF; font-weight:bold;">Vertical (climb-rate command)</td></tr>
+                    <tr><td><code>hover_thrust</code></td><td>0.5</td><td>Zero-climb-rate command.</td></tr>
+                    <tr><td><code>climb_thrust</code></td><td>0.52</td><td>Constant gentle climb sent during CLIMB — this <em>is</em> the takeoff.</td></tr>
+                    <tr><td><code>thrust_min / max</code></td><td>0.45 / 0.6</td><td>Clamp on the commanded climb rate.</td></tr>
+                    <tr><td><code>takeoff_height</code></td><td>1.0 m</td><td>CLIMB ends at this odometry altitude (<code>climb_settle_time</code> 10 s is the fallback).</td></tr>
+                    <tr><td><code>target_z</code></td><td>−0.5 m</td><td>Standoff: hover 0.5 m <em>above</em> the tag.</td></tr>
+                    <tr><td><code>depth_guess</code></td><td>2.0 m</td><td>Assumed distance when the vision module gives no depth; scales lateral gains only.</td></tr>
+
+                    <tr><td colspan="3" style="background:#FDEEDF; font-weight:bold;">Lateral cascade</td></tr>
+                    <tr><td><code>target_x / target_y</code></td><td>0 / 0</td><td>Desired target offset in the body frame (0 = directly below).</td></tr>
+                    <tr><td><code>descend_xy_gate</code></td><td>0.25 m</td><td>Descend only while laterally centered within this radius.</td></tr>
+                    <tr><td><code>max_tilt</code></td><td>0.15 rad</td><td>Clamp on the desired tilt (~8.5°).</td></tr>
+                    <tr><td><code>kp_att</code></td><td>1.5</td><td>Attitude inner loop: body rate per rad of tilt error.</td></tr>
+                    <tr><td><code>max_body_rate</code></td><td>0.35 rad/s</td><td>Clamp on the commanded body rates (~20°/s).</td></tr>
+                    <tr><td><code>kp_hover / kv_hover</code></td><td>0.15 / 0.25</td><td>Position-hold P and velocity damping used by the hold states.</td></tr>
+
+                    <tr><td colspan="3" style="background:#FDEEDF; font-weight:bold;">PID gains</td></tr>
+                    <tr><td><code>pid_xy</code></td><td>kp 0.15, ki 0.002, kd 0.15</td><td>Target error → desired tilt. kd is the velocity damping that keeps the descent stable; i_max 0.05 rad bounds the integral contribution (anti-windup).</td></tr>
+                    <tr><td><code>pid_z</code></td><td>kp 0.15, ki 0.001, kd 0</td><td>Depth error → climb-rate delta; i_max 0.1.</td></tr>
+
+                    <tr><td colspan="3" style="background:#FDEEDF; font-weight:bold;">State machine timing</td></tr>
+                    <tr><td><code>align_tolerance</code></td><td>0.15 m</td><td>Error below this counts as aligned.</td></tr>
+                    <tr><td><code>align_dwell_time</code></td><td>2.0 s</td><td>Must stay aligned this long → ALIGNED.</td></tr>
+                    <tr><td><code>align_hysteresis</code></td><td>1.5</td><td>Multiplies the tolerance for leaving ALIGNED.</td></tr>
+                    <tr><td><code>tag_timeout</code></td><td>0.5 s</td><td>No fresh target within this time → TAG_LOST.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer lab-footer">
+        <div class="container">
+            <div class="content has-text-centered">
+                <div class="columns is-centered" style="margin-bottom: 1rem; gap: 1rem;">
+                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
+                        <img src="./logo/FER_logo.png" alt="FER" style="height: 90px; width: auto; opacity: 0.9;" />
+                    </div>
+                    <div class="column is-narrow" style="display: flex; align-items: center; justify-content: center;">
+                        <img src="./logo/Larics_logo.png" alt="LARICS" style="height: 40px; width: auto; opacity: 0.9;" />
+                    </div>
+                </div>
+                <p>&copy; 2026 Jakob Domislovic | University of Zagreb — LARICS<br>
+                    <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank">GitHub Repository</a>
+                </p>
+            </div>
+        </div>
+    </footer>
+
+</body>
+
+</html>
