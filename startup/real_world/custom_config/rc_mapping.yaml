@@ -1,0 +1,11 @@
+# RC channel mapping for uav_ros_general's rc_to_joy (mapping_file arg,
+# exported as RC_MAPPING in rw_setup.sh) -- same role as in
+# perching_uav/startup/rw. Adapt per transmitter; for reference the tukan
+# mapping is: throttle 0, roll 2, pitch 3, yaw 1, rc_on 6, mode 5.
+channel:
+  throttle: 2
+  roll: 0
+  pitch: 1
+  yaw: 3
+  rc_on: 6
+  mode: 5

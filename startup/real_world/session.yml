@@ -22,10 +22,10 @@ windows:
   - joystick:
       layout: tiled
       panes:
-        # RC -> joy bridge (package-local port of uav_ros_general rc_to_joy);
-        # channel mapping + deadzones live in custom_config/rc_to_joy.yaml
-        - waitForRos; waitForMavros; roslaunch ibvs_perching rc_to_joy.launch
-          config_file:=$(pwd)/custom_config/rc_to_joy.yaml
+        # RC -> joy bridge, same as perching_uav/startup/rw; RC_MAPPING is
+        # exported in rw_setup.sh (channel mapping per transmitter)
+        - waitForRos; roslaunch uav_ros_general rc_to_joy.launch
+          mapping_file:=$RC_MAPPING
         - waitForRos; rostopic echo /$UAV_NAMESPACE/joy
   - ibvs:
       layout: tiled

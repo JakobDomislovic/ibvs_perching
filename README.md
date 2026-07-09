@@ -495,18 +495,19 @@ cd ~/uav_ws/src/ibvs_perching/startup/real_world
 ./start.sh                    # or ./start.sh my_aircraft_setup.sh
 ```
 
-The package is **self-contained** on the aircraft — no `uav_ros_stack`
-required. What used to come from `uav_ros_general` is now package-local:
+Most of what used to come from `uav_ros_stack` is now package-local:
 
 | Was (uav_ros_general) | Now (ibvs_perching) |
 |---|---|
 | `apm2.launch` + `mavros_node.launch` | `launch/mavros_apm.launch` + `config/apm_config.yaml` |
-| `rc_to_joy` C++ node + mapping/deadzone yamls | `scripts/rc_to_joy.py` + `config/rc_to_joy.yaml` |
 | `waitForRos`/`waitForMavros`/`waitForSysStatus` shell helpers | `startup/real_world/shell_helpers.sh` |
 
-Only `mavros` itself (system package) and a camera driver are external.
+The **joystick stays the standard one**: the session launches
+`uav_ros_general rc_to_joy.launch mapping_file:=$RC_MAPPING`, exactly like
+`perching_uav/startup/rw` (`scripts/rc_to_joy.py` is a drop-in Python port
+of that node, kept only as a fallback for an aircraft without the stack).
 Per-aircraft settings (FCU serial port, RC channel mapping) live in
-`startup/real_world/rw_setup.sh` and `custom_config/rc_to_joy.yaml`.
+`startup/real_world/rw_setup.sh` and `custom_config/rc_mapping.yaml`.
 
 **The engagement flow — no `position_hold` service.** The controller runs
 with `engage_on_target: true` (`custom_config/ibvs_params_rw.yaml`):

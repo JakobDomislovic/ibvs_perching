@@ -68,7 +68,7 @@ windows:
         - history -s "rosrun ibvs_perching keyboard_rc.py __ns:=$UAV_NAMESPACE"
         # same RC->joy bridge as the real vehicle (reads mavros/rc/in, which
         # reflects the overrides) -- /$UAV_NAMESPACE/joy works in sim too
-        - waitForRos; waitForMavros; roslaunch ibvs_perching rc_to_joy.launch
+        - waitForRos; waitForMavros; roslaunch uav_ros_general rc_to_joy.launch
         - waitForRos; rostopic echo /$UAV_NAMESPACE/joy
   - status:
       layout: tiled
