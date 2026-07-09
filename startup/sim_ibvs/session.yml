@@ -60,7 +60,8 @@ windows:
         # (sets SYSID_MYGCS=1 itself, otherwise ArduPilot ignores overrides).
         # GRABS THE KEYBOARD in this pane, so start it yourself (press up):
         # o = arm, 2 = ALT_HOLD, w = climb, arrows = roll/pitch, a/d = yaw,
-        # q = quit. Rehearsing the real-world engagement: see README sec. 12.
+        # i = START IBVS (the next tag detection then takes over -- this is
+        # the future real-joystick button), k = stop, q = quit. README sec. 12.
         - history -s "rosrun ibvs_perching keyboard_rc.py __ns:=$UAV_NAMESPACE"
         # same RC->joy bridge as the real vehicle (reads mavros/rc/in, which
         # reflects the overrides) -- /$UAV_NAMESPACE/joy works in sim too

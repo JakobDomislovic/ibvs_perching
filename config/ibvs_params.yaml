@@ -7,6 +7,17 @@
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
 # ---------------------------------------------------------------------------
+# Mid-flight engagement (fly manually with the keyboard joystick, then let
+# IBVS take over). engage_on_target lets the controller seize GUIDED_NOGPS
+# itself on a fresh ibvs/target_point; engage_needs_start gates that behind
+# an ibvs/start call first ('i' on the keyboard joystick, a real joystick
+# button later) so seeing the tag alone never grabs control. The classic
+# service mission (ibvs/takeoff -> ibvs/start) is unaffected.
+# ---------------------------------------------------------------------------
+engage_on_target: true
+engage_needs_start: true
+
+# ---------------------------------------------------------------------------
 # Z axis -- climb rate through the AttitudeTarget "thrust" field.
 #
 # In GUIDED/GUIDED_NOGPS ArduPilot interprets thrust as a CLIMB RATE

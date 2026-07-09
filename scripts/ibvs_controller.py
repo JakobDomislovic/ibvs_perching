@@ -93,12 +93,17 @@ Two-step mission (both std_srvs/Trigger):
     straight into ALIGN).
 
 REAL WORLD (~engage_on_target: true, see startup/real_world):
-    The safety pilot flies the vehicle manually (e.g. STABILIZE) and the
-    first fresh `ibvs/target_point` IS the "go autonomous" signal -- no
-    takeoff service and no position_hold-style handshake. On that first
-    point (while armed) the controller switches the FCU to GUIDED_NOGPS
-    itself and, once mavros/state confirms armed + GUIDED_NOGPS, goes
-    straight to ALIGN (the vehicle is already airborne, CLIMB is skipped).
+    The safety pilot flies the vehicle manually (e.g. STABILIZE) and a
+    fresh `ibvs/target_point` engages the controller -- no takeoff
+    service and no position_hold-style handshake. With
+    ~engage_needs_start: true (the shipped configs) engagement is
+    BUTTON-GATED: the pilot calls `ibvs/start` first ('i' on the sim
+    keyboard joystick, a joystick button on the real RC) and the next
+    point is what engages; with it false the very first point engages.
+    On engagement (while armed) the controller switches the FCU to
+    GUIDED_NOGPS itself and, once mavros/state confirms armed +
+    GUIDED_NOGPS, goes straight to ALIGN (the vehicle is already
+    airborne, CLIMB is skipped).
     The software mode switch is ONE-SHOT: if the safety pilot takes back
     control with the RC mode switch, the controller never grabs the mode
     again on its own -- flipping the RC switch back to GUIDED_NOGPS
@@ -250,7 +255,13 @@ class IbvsController:
         # back just because the vision module keeps publishing; call
         # ibvs/start to re-arm it.
         self.engage_on_target = rospy.get_param('~engage_on_target', False)
-        self.engage_armed = self.engage_on_target
+        # Button-gated engagement: when true, the controller does NOT
+        # engage on the very first point -- somebody must call ibvs/start
+        # first ('i' on the sim keyboard joystick, a joystick button on
+        # the real RC). The point that arrives after the button press is
+        # what engages.
+        self.engage_needs_start = rospy.get_param('~engage_needs_start', False)
+        self.engage_armed = self.engage_on_target and not self.engage_needs_start
 
         self.state = WAIT_ARM
         self.state_entered_at = rospy.Time.now()

@@ -1,19 +1,20 @@
 # ibvs_controller.py parameters -- REAL WORLD (startup/real_world).
 #
-# Same controller as in simulation (config/ibvs_params.yaml) with ONE
-# behavioral difference: engage_on_target. The vehicle is flown MANUALLY
-# (STABILIZE) by the safety pilot; the first point published on
-# ibvs/target_point makes the controller switch the FCU to GUIDED_NOGPS
-# itself and start servoing -- no takeoff service, no position_hold
-# handshake. The safety pilot always takes back control with the RC mode
-# switch; after such a takeover the controller never re-takes the mode on
-# its own (flip the RC switch back to GUIDED_NOGPS to re-engage, or call
-# ibvs/start to allow the next target point to engage again).
+# Same controller as in simulation (config/ibvs_params.yaml). The vehicle
+# is flown MANUALLY (STABILIZE) by the safety pilot; call ibvs/start (the
+# IBVS joystick button -- 'i' on the sim keyboard) and the next point
+# published on ibvs/target_point makes the controller switch the FCU to
+# GUIDED_NOGPS itself and start servoing -- no takeoff service, no
+# position_hold handshake. The safety pilot always takes back control
+# with the RC mode switch; after such a takeover the controller never
+# re-takes the mode on its own (flip the RC switch back to GUIDED_NOGPS
+# to re-engage, or press the button again for the next point to engage).
 #
 # GUID_OPTIONS must be 0 on the FCU (set in session.yml): thrust is a
 # CLIMB RATE (0.0 max descent, 0.5 hover, 1.0 max climb), NOT raw thrust.
 
-engage_on_target: true        # ibvs/target_point IS the "go autonomous" signal
+engage_on_target: true        # a fresh ibvs/target_point engages the controller
+engage_needs_start: true      # ...but only after ibvs/start (joystick button)
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 

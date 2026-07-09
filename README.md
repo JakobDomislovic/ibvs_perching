@@ -514,17 +514,20 @@ with `engage_on_target: true` (`custom_config/ibvs_params_rw.yaml`):
 
 1. The safety pilot takes off **manually** (STABILIZE) and flies to the
    area. The controller sits in `WAIT_ARM`, streaming (ignored) setpoints.
-2. The first fresh point on `ibvs/target_point` — a tag detection, or any
-   point you choose to publish — **is** the "go autonomous" signal: the
-   controller switches the FCU to `GUIDED_NOGPS` itself and goes straight
-   to `ALIGN` (`CLIMB` is skipped, the vehicle is already airborne). If the
-   point goes stale within `tag_timeout`, it simply **holds position**
-   (`TAG_LOST`) — publishing one empty point is effectively position hold.
+2. Press the **IBVS button** — `ibvs/start` (`i` on the sim keyboard
+   joystick; a real joystick button later). The next fresh point on
+   `ibvs/target_point` — a tag detection, or any point you choose to
+   publish — engages: the controller switches the FCU to `GUIDED_NOGPS`
+   itself and goes straight to `ALIGN` (`CLIMB` is skipped, the vehicle is
+   already airborne). If the point goes stale within `tag_timeout`, it
+   simply **holds position** (`TAG_LOST`) — button + one empty point is
+   effectively position hold. (Set `engage_needs_start: false` to skip
+   the button and engage on the very first point.)
 3. The safety pilot can **always** take back control with the RC mode
    switch. The software mode switch is one-shot: after a takeover the
    controller never re-takes the mode on its own. Flip the RC switch back
-   to `GUIDED_NOGPS` to re-engage, or call `ibvs/start` to let the next
-   target point engage again. `ibvs/stop` drops servoing back to a hover.
+   to `GUIDED_NOGPS` to re-engage, or press the button again to let the
+   next target point engage. `ibvs/stop` drops servoing back to a hover.
 
 Before the first flight check `GUID_OPTIONS = 0` on the FCU (the `ibvs`
 tmux pane sets it): with `GUID_OPTIONS = 8` the thrust field is raw thrust
@@ -539,19 +542,14 @@ only accepts overrides from MAVProxy (sysid 255) and silently ignores
 mavros, i.e. the keyboard would do nothing.
 
 In the sim session (`startup/sim_ibvs`) the `joystick` window has it
-pre-typed (press ↑). Flying manually works with the normal sim session as
-is. To rehearse the **engagement**, the controller must run with the rw
-config — kill the launch in the `ibvs` window's first pane and run:
+pre-typed (press ↑), and the sim config already has `engage_on_target` +
+`engage_needs_start` enabled — no relaunch or special config needed:
 
-```bash
-roslaunch ibvs_perching ibvs_perching.launch \
-  config:=$(rospack find ibvs_perching)/startup/real_world/custom_config/ibvs_params_rw.yaml
-```
-
-Then in the `joystick` window: `o` arm → `2` ALT_HOLD → hold `w` to climb
-→ arrows (roll/pitch) and `a`/`d` (yaw) to fly over the tag → the first
+`o` arm → `2` ALT_HOLD → hold `w` to climb → arrows (roll/pitch) and
+`a`/`d` (yaw) to fly over the tag → **`i` (start IBVS)** → the next
 detection engages `GUIDED_NOGPS` by itself. Press `2` to "take over" like
 the safety pilot (the controller must not steal the mode back), `g` to
-hand control back, `q` to quit (releases all overrides). Sticks spring
-back to center when a key is released; fly in ALT_HOLD, not STABILIZE —
-centered throttle holds altitude, which is what keyboard flying needs.
+hand control back (or `i` again to re-arm engagement), `k` to stop
+servoing, `q` to quit (releases all overrides). Sticks spring back to
+center when a key is released; fly in ALT_HOLD, not STABILIZE — centered
+throttle holds altitude, which is what keyboard flying needs.

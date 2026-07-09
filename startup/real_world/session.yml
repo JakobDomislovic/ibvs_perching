@@ -30,15 +30,17 @@ windows:
   - ibvs:
       layout: tiled
       panes:
-        # REAL-WORLD FLOW (engage_on_target: true, no position_hold service):
+        # REAL-WORLD FLOW (engage_on_target + engage_needs_start, no
+        # position_hold service):
         #   1. safety pilot takes off MANUALLY (STABILIZE) and flies to the area
-        #   2. the first point published on /$UAV_NAMESPACE/ibvs/target_point
-        #      (tag detection, or a manually chosen point) makes the controller
+        #   2. call ibvs/start (the IBVS joystick button, someday) -- the next
+        #      point published on /$UAV_NAMESPACE/ibvs/target_point (tag
+        #      detection, or a manually chosen point) makes the controller
         #      switch the FCU to GUIDED_NOGPS itself and start servoing
         #   3. the safety pilot can ALWAYS take back control with the RC mode
         #      switch; the controller never re-takes the mode on its own --
         #      flip the RC switch back to GUIDED_NOGPS to re-engage, or call
-        #      ibvs/start to allow the next target point to engage again
+        #      ibvs/start again for the next target point to engage
         #
         # GUID_OPTIONS must be 0 so ArduPilot interprets AttitudeTarget.thrust
         # as a CLIMB RATE (0.5 = hover). GUID_OPTIONS=8 (raw thrust, used for
@@ -47,9 +49,10 @@ windows:
           roslaunch ibvs_perching ibvs_perching.launch
           config:=$(pwd)/custom_config/ibvs_params_rw.yaml
           spawn_ar_tag:=false
-        # engagement smoke test: an all-zero point engages GUIDED_NOGPS; it
-        # goes stale within tag_timeout, so the vehicle just HOLDS position
-        # (this is the position_hold replacement -- fly, publish, hands off)
+        # engagement smoke test: call ibvs/start (the "button"), then an
+        # all-zero point engages GUIDED_NOGPS; it goes stale within
+        # tag_timeout, so the vehicle just HOLDS position (this is the
+        # position_hold replacement -- fly, press button, publish, hands off)
         - history -s "rostopic pub --once /$UAV_NAMESPACE/ibvs/target_point geometry_msgs/PointStamped '{}'"
         - history -s "rosservice call /$UAV_NAMESPACE/ibvs/stop"
         - history -s "rosservice call /$UAV_NAMESPACE/ibvs/start"

@@ -19,6 +19,9 @@ Keys (sticks spring back to center on release):
     w / s       climb / descend (throttle)
     a / d       yaw left / right
     space       center all sticks
+    i / k       call ibvs/start / ibvs/stop -- the "IBVS button" that a
+                real joystick will have; with engage_needs_start this is
+                what lets the next tag detection take over
     1 / 2 / 3   mode STABILIZE / ALT_HOLD / LOITER   <- "pilot takes over"
     g           mode GUIDED_NOGPS                    <- "pilot hands back"
     o / p       arm / disarm (disarm mid-air = crash; it is a simulator)
@@ -26,10 +29,10 @@ Keys (sticks spring back to center on release):
 
 Fly in ALT_HOLD (2): centered throttle holds altitude, w/s command
 climb/descent -- much easier on a keyboard than STABILIZE. Typical test:
-    o (arm) -> hold w (climb) -> arrows to fly over the tag ->
-    detector publishes ibvs/target_point -> controller engages GUIDED_NOGPS
+    o (arm) -> 2 (ALT_HOLD) -> hold w (climb) -> arrows over the tag ->
+    i (start IBVS) -> next detection engages GUIDED_NOGPS by itself
     -> 2 (take over, one-shot: controller must NOT steal the mode back)
-    -> g (hand control back to the controller)
+    -> g (hand control back), or i again to re-arm the engagement
 
 While disarmed the throttle idles LOW (arming with mid throttle is
 rejected by ArduPilot); once armed it springs to center (1500).
@@ -45,6 +48,7 @@ Parameters:
     ~rate           publish rate [Hz] (default 20)
 """
 
+import os
 import select
 import sys
 import termios
@@ -54,6 +58,7 @@ import tty
 import rospy
 from mavros_msgs.msg import OverrideRCIn, ParamValue, State
 from mavros_msgs.srv import CommandBool, ParamSet, SetMode
+from std_srvs.srv import Trigger
 
 PWM_MID = 1500
 PWM_LOW = 1100
@@ -61,7 +66,8 @@ CHAN_RELEASE = OverrideRCIn.CHAN_RELEASE      # 0: give the channel back
 CHAN_NOCHANGE = OverrideRCIn.CHAN_NOCHANGE    # 65535: leave untouched
 
 HELP = ("arrows roll/pitch | w/s climb/descend | a/d yaw | space center | "
-        "1 STAB 2 ALT_HOLD 3 LOITER g GUIDED_NOGPS | o arm p disarm | q quit")
+        "i START IBVS  k stop | 1 STAB 2 ALT_HOLD 3 LOITER g GUIDED_NOGPS | "
+        "o arm p disarm | q quit")
 
 
 class KeyboardRc:
@@ -87,6 +93,9 @@ class KeyboardRc:
         rospy.Subscriber('mavros/state', State, self.state_callback, queue_size=1)
         self.set_mode_srv = rospy.ServiceProxy('mavros/set_mode', SetMode)
         self.arming_srv = rospy.ServiceProxy('mavros/cmd/arming', CommandBool)
+        # 'i'/'k' act as the IBVS button of the future real joystick
+        self.ibvs_start_srv = rospy.ServiceProxy('ibvs/start', Trigger)
+        self.ibvs_stop_srv = rospy.ServiceProxy('ibvs/stop', Trigger)
 
     def state_callback(self, msg):
         self.armed = msg.armed
@@ -133,6 +142,14 @@ class KeyboardRc:
         except rospy.ServiceException as exc:
             self.status_line('arming failed: %s' % exc)
 
+    def call_ibvs(self, srv, name):
+        try:
+            res = srv()
+            self.status_line('%s: %s' % (name, res.message))
+        except (rospy.ServiceException, rospy.ROSException) as exc:
+            self.status_line('%s failed (is the ibvs node running?): %s'
+                             % (name, exc))
+
     def handle_key(self, key):
         if key == '\x1b[D':
             self.press('roll', -1.0)
@@ -161,6 +178,10 @@ class KeyboardRc:
             self.set_mode(State.MODE_APM_COPTER_LOITER)
         elif key == 'g':
             self.set_mode(State.MODE_APM_COPTER_GUIDED_NOGPS)
+        elif key == 'i':
+            self.call_ibvs(self.ibvs_start_srv, 'ibvs/start')
+        elif key == 'k':
+            self.call_ibvs(self.ibvs_stop_srv, 'ibvs/stop')
         elif key == 'o':
             self.arm(True)
         elif key == 'p':
@@ -210,14 +231,20 @@ class KeyboardRc:
             rospy.sleep(0.05)
 
     def read_keys(self, timeout):
-        """Read pending keypresses, decoding arrow-key escape sequences."""
+        """Read pending keypresses, decoding arrow-key escape sequences.
+
+        Must read the RAW fd (os.read): sys.stdin.read(1) buffers the rest
+        of an escape sequence inside Python where select() cannot see it,
+        which splits arrows into a lone ESC -- roll/pitch keys would be
+        silently dropped while plain letter keys keep working.
+        """
         keys = []
         if not select.select([sys.stdin], [], [], timeout)[0]:
             return keys
-        data = sys.stdin.read(1)
+        data = os.read(sys.stdin.fileno(), 64).decode(errors='ignore')
         # drain whatever arrived together (escape sequences, autorepeat)
         while select.select([sys.stdin], [], [], 0)[0]:
-            data += sys.stdin.read(1)
+            data += os.read(sys.stdin.fileno(), 64).decode(errors='ignore')
         i = 0
         while i < len(data):
             # arrows arrive as ESC [ X (CSI) or ESC O X (application mode,
