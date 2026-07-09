@@ -1,0 +1,15 @@
+<launch>
+  <!-- RC transmitter -> joy bridge (package-local port of the
+       uav_ros_general rc_to_joy node, see scripts/rc_to_joy.py).
+       The config file carries BOTH the channel mapping and the stick
+       deadzones; adapt it per transmitter
+       (startup/real_world/custom_config/rc_to_joy.yaml). -->
+
+  <arg name="namespace" default="$(env UAV_NAMESPACE)"/>
+  <arg name="config_file" default="$(find ibvs_perching)/config/rc_to_joy.yaml"/>
+
+  <node pkg="ibvs_perching" type="rc_to_joy.py" name="rc_to_joy"
+        output="screen" ns="$(arg namespace)">
+    <rosparam command="load" file="$(arg config_file)"/>
+  </node>
+</launch>

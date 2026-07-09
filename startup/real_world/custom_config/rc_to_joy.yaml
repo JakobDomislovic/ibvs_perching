@@ -1,0 +1,18 @@
+# rc_to_joy.py parameters: RC channel mapping + stick deadzones.
+# THIS is the flight-day file (session.yml points here) -- adapt the
+# channel indices to the transmitter actually used. For reference, the
+# tukan mapping is: throttle 0, roll 2, pitch 3, yaw 1, rc_on 6, mode 5.
+channel:
+  throttle: 2
+  roll: 0
+  pitch: 1
+  yaw: 3
+  rc_on: 6
+  mode: 5
+
+joy:
+  deadzone:
+    x: 0.05
+    y: 0.05
+    z: 0.2
+    yaw: 0.05

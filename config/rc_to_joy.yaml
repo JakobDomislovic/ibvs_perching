@@ -1,0 +1,18 @@
+# rc_to_joy.py parameters: RC channel mapping + stick deadzones.
+# Default mapping copied from uav_ros_general's rc_mapping.yaml /
+# deadzone.params.yaml. Adapt the channel indices per transmitter (e.g.
+# the tukan mapping swaps throttle/roll/pitch/yaw around).
+channel:
+  throttle: 2
+  roll: 0
+  pitch: 1
+  yaw: 3
+  rc_on: 6
+  mode: 5
+
+joy:
+  deadzone:
+    x: 0.05
+    y: 0.05
+    z: 0.2
+    yaw: 0.05

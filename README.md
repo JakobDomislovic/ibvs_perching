@@ -16,8 +16,7 @@ ArduPilot **directly** over `mavros/setpoint_raw/attitude`, sending roll/pitch
 ## Table of contents
 
 1. [Motivation & design decisions](#1-motivation--design-decisions)
-2. [How ArduPilot interprets the setpoint (REAErik vnuc
-MartaD THIS)](#2-how-ardupilot-interprets-the-setpoint-read-this)
+2. [How ArduPilot interprets the setpoint (READ THIS)](#2-how-ardupilot-interprets-the-setpoint-read-this)
 3. [Architecture](#3-architecture)
 4. [The state machine](#4-the-state-machine)
 5. [Control laws](#5-control-laws)
@@ -27,6 +26,7 @@ MartaD THIS)](#2-how-ardupilot-interprets-the-setpoint-read-this)
 9. [Troubleshooting (incl. "it does not take off")](#9-troubleshooting)
 10. [Integrating a real AR-tag detector](#10-integrating-a-real-ar-tag-detector)
 11. [Known limitations & future work](#11-known-limitations--future-work)
+12. [Flying for real (`real_world` branch)](#12-flying-for-real-real_world-branch)
 
 ---
 
@@ -487,3 +487,44 @@ or detection dropouts.
 - Body-rate X-Y control causes lateral drift *while* rotating (rates ≠
   velocities); the P-loop corrects it continuously, but a velocity-based
   outer loop would track faster.
+
+## 12. Flying for real (`real_world` branch)
+
+```bash
+cd ~/uav_ws/src/ibvs_perching/startup/real_world
+./start.sh                    # or ./start.sh my_aircraft_setup.sh
+```
+
+The package is **self-contained** on the aircraft — no `uav_ros_stack`
+required. What used to come from `uav_ros_general` is now package-local:
+
+| Was (uav_ros_general) | Now (ibvs_perching) |
+|---|---|
+| `apm2.launch` + `mavros_node.launch` | `launch/mavros_apm.launch` + `config/apm_config.yaml` |
+| `rc_to_joy` C++ node + mapping/deadzone yamls | `scripts/rc_to_joy.py` + `config/rc_to_joy.yaml` |
+| `waitForRos`/`waitForMavros`/`waitForSysStatus` shell helpers | `startup/real_world/shell_helpers.sh` |
+
+Only `mavros` itself (system package) and a camera driver are external.
+Per-aircraft settings (FCU serial port, RC channel mapping) live in
+`startup/real_world/rw_setup.sh` and `custom_config/rc_to_joy.yaml`.
+
+**The engagement flow — no `position_hold` service.** The controller runs
+with `engage_on_target: true` (`custom_config/ibvs_params_rw.yaml`):
+
+1. The safety pilot takes off **manually** (STABILIZE) and flies to the
+   area. The controller sits in `WAIT_ARM`, streaming (ignored) setpoints.
+2. The first fresh point on `ibvs/target_point` — a tag detection, or any
+   point you choose to publish — **is** the "go autonomous" signal: the
+   controller switches the FCU to `GUIDED_NOGPS` itself and goes straight
+   to `ALIGN` (`CLIMB` is skipped, the vehicle is already airborne). If the
+   point goes stale within `tag_timeout`, it simply **holds position**
+   (`TAG_LOST`) — publishing one empty point is effectively position hold.
+3. The safety pilot can **always** take back control with the RC mode
+   switch. The software mode switch is one-shot: after a takeover the
+   controller never re-takes the mode on its own. Flip the RC switch back
+   to `GUIDED_NOGPS` to re-engage, or call `ibvs/start` to let the next
+   target point engage again. `ibvs/stop` drops servoing back to a hover.
+
+Before the first flight check `GUID_OPTIONS = 0` on the FCU (the `ibvs`
+tmux pane sets it): with `GUID_OPTIONS = 8` the thrust field is raw thrust
+instead of climb rate and the controller **flies away** (section 2).

@@ -36,6 +36,10 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>gazebo_ros</exec_depend>
+  <!-- real world: mavros_apm.launch runs mavros_node directly (the apm
+       pluginlists also pull plugins from mavros_extras) -->
+  <exec_depend>mavros</exec_depend>
+  <exec_depend>mavros_extras</exec_depend>
 
   <export>
     <!-- lets gazebo resolve model://ar_tag (texture + material) -->

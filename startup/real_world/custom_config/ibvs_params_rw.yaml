@@ -1,0 +1,73 @@
+# ibvs_controller.py parameters -- REAL WORLD (startup/real_world).
+#
+# Same controller as in simulation (config/ibvs_params.yaml) with ONE
+# behavioral difference: engage_on_target. The vehicle is flown MANUALLY
+# (STABILIZE) by the safety pilot; the first point published on
+# ibvs/target_point makes the controller switch the FCU to GUIDED_NOGPS
+# itself and start servoing -- no takeoff service, no position_hold
+# handshake. The safety pilot always takes back control with the RC mode
+# switch; after such a takeover the controller never re-takes the mode on
+# its own (flip the RC switch back to GUIDED_NOGPS to re-engage, or call
+# ibvs/start to allow the next target point to engage again).
+#
+# GUID_OPTIONS must be 0 on the FCU (set in session.yml): thrust is a
+# CLIMB RATE (0.0 max descent, 0.5 hover, 1.0 max climb), NOT raw thrust.
+
+engage_on_target: true        # ibvs/target_point IS the "go autonomous" signal
+
+control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
+
+# ---------------------------------------------------------------------------
+# Z axis -- climb rate through the AttitudeTarget "thrust" field.
+# ---------------------------------------------------------------------------
+hover_thrust: 0.5             # zero-climb-rate ("hover") command
+climb_thrust: 0.52            # only used by the ibvs/takeoff CLIMB path
+thrust_min: 0.45              # clamp: gentlest allowed descent command
+thrust_max: 0.6               # clamp: strongest allowed climb command
+takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
+
+# Desired target height ABOVE the vehicle (negative = target below).
+# -0.5 => hover 0.5 m above the tag. Vertical motion only happens when the
+# vision module provides a depth (point.z > 0).
+target_z: -0.5
+depth_guess: 2.0              # [m] assumed target distance when the vision
+                              # module sends no depth (point.z = 0); only
+                              # scales X-Y gains, never causes Z motion
+
+# ---------------------------------------------------------------------------
+# X-Y axis -- closed-loop IBVS cascade on the tag position error:
+#   desired_tilt = PID_xy(tag error), body_rate = kp_att * (tilt error)
+# ---------------------------------------------------------------------------
+target_x: 0.0                 # desired relative tag x (forward) offset [m]
+target_y: 0.0                 # desired relative tag y (left) offset [m]
+descend_xy_gate: 0.25         # [m] descend only while centered within this radius
+
+max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
+kp_att: 1.5                   # body rate per rad of attitude error [1/s]
+max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s)
+kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]
+kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
+
+# ---------------------------------------------------------------------------
+# PID gains (flight-tested starting point, same as simulation)
+# ---------------------------------------------------------------------------
+pid_xy:
+  kp: 0.10                    # desired tilt per meter of tag error [rad/m]
+  ki: 0.0                     # [rad per m*s]
+  kd: 0.15                    # [rad per m/s] velocity damping -- keep > 0
+  i_max: 0.05                 # [rad] max integral contribution
+
+pid_z:
+  kp: 0.1                     # climb-rate delta per meter of tag z error [1/m]
+  ki: 0.0                     # [1 per m*s]
+  kd: 0.0                     # [1 per m/s]
+  i_max: 0.1                  # max integral contribution
+
+# ---------------------------------------------------------------------------
+# State machine timing / thresholds
+# ---------------------------------------------------------------------------
+climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
+align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
+align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
+tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST
