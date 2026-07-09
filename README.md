@@ -528,3 +528,22 @@ with `engage_on_target: true` (`custom_config/ibvs_params_rw.yaml`):
 Before the first flight check `GUID_OPTIONS = 0` on the FCU (the `ibvs`
 tmux pane sets it): with `GUID_OPTIONS = 8` the thrust field is raw thrust
 instead of climb rate and the controller **flies away** (section 2).
+
+**Rehearsing this flow in simulation.** `scripts/keyboard_rc.py` is a
+keyboard "RC transmitter" for SITL: it flies the vehicle through
+`mavros/rc/override`, so ArduPilot sees real RC input (and reports it on
+`mavros/rc/in` — `rc_to_joy.py` works in sim unchanged). In the sim
+session (`startup/sim_ibvs`), kill the launch pane, relaunch with the rw
+config (pre-typed in history), then:
+
+```bash
+rosrun ibvs_perching keyboard_rc.py __ns:=$UAV_NAMESPACE
+```
+
+`o` arm → `2` ALT_HOLD → hold `w` to climb → arrows (roll/pitch) and
+`a`/`d` (yaw) to fly over the tag → the first detection engages
+`GUIDED_NOGPS` by itself. Press `2` to "take over" like the safety pilot
+(the controller must not steal the mode back), `g` to hand control back,
+`q` to quit (releases all overrides). Sticks spring back to center when
+a key is released; fly in ALT_HOLD, not STABILIZE — centered throttle
+holds altitude, which is what keyboard flying needs.

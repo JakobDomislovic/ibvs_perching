@@ -16,6 +16,7 @@ catkin_install_python(PROGRAMS
   scripts/mock_ar_tag_publisher.py
   scripts/aruco_detector.py
   scripts/rc_to_joy.py
+  scripts/keyboard_rc.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
