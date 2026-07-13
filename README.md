@@ -15,6 +15,7 @@ ArduPilot **directly** over `mavros/setpoint_raw/attitude`, sending roll/pitch
 
 ## Table of contents
 
+0. [Quickstart — run everything in Docker](#0-quickstart--run-everything-in-docker)
 1. [Motivation & design decisions](#1-motivation--design-decisions)
 2. [How ArduPilot interprets the setpoint (READ THIS)](#2-how-ardupilot-interprets-the-setpoint-read-this)
 3. [Architecture](#3-architecture)
@@ -27,6 +28,34 @@ ArduPilot **directly** over `mavros/setpoint_raw/attitude`, sending roll/pitch
 10. [Integrating a real AR-tag detector](#10-integrating-a-real-ar-tag-detector)
 11. [Known limitations & future work](#11-known-limitations--future-work)
 12. [Flying for real (`real_world` branch)](#12-flying-for-real-real_world-branch)
+
+---
+
+## 0. Quickstart — run everything in Docker
+
+The fastest way to a flying simulation — no ROS installation, no catkin
+workspace, no GitHub account or SSH key. You need a Linux host with
+[Docker](https://docs.docker.com/engine/install/ubuntu/); run
+`xhost +local:docker` once per login session so Gazebo/RViz can open windows.
+
+```bash
+git clone https://github.com/JakobDomislovic/ibvs_perching.git
+cd ibvs_perching
+./docker/build.sh        # first build takes a while (~20-30 min)
+./docker/run.sh          # drops you into startup/sim_ibvs inside the container
+./start.sh               # Gazebo + SITL + mavros + IBVS (see section 8)
+```
+
+The image bundles the prebuilt LARICS `uav_ros_stack`, the
+[`uav_ros_simulation`](https://github.com/larics/uav_ros_simulation) stack
+**pinned to a known-good commit**, and this package, already built. By default
+`run.sh` mounts your checkout into the container, so you can edit code on the
+host and rerun it inside without rebuilding the image.
+
+All the details — GPU/non-GPU variants, all flags, developing inside the
+container, updating the pinned simulation — are in
+[docker/README.md](docker/README.md) and on the
+[documentation site](https://jakobdomislovic.github.io/ibvs_perching/docker.html).
 
 ---
 
@@ -359,6 +388,9 @@ behaves realistically.
 
 ## 7. Building
 
+*(Using the [Docker quickstart](#0-quickstart--run-everything-in-docker)? Skip
+this section — the image builds everything.)*
+
 ```bash
 cd ~/uav_ws
 catkin build ibvs_perching
@@ -371,7 +403,7 @@ Dependencies are standard: `rospy`, `mavros_msgs`, `geometry_msgs`,
 ## 8. Running the simulation demo
 
 ```bash
-cd ~/uav_ws/src/ibvs_perching/startup/sim_ibvs
+cd ~/uav_ws/src/ibvs_perching/startup/sim_ibvs   # in the Docker container you are already here
 ./start.sh
 ```
 

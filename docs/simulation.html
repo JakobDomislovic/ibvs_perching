@@ -20,6 +20,7 @@
             <a class="nav-brand" href="index.html"><i class="fas fa-crosshairs"></i> IBVS Perching</a>
             <div class="nav-links">
                 <a href="index.html">Home</a>
+                <a href="docker.html">Docker</a>
                 <a href="simulation.html" class="is-active">Simulation</a>
                 <a href="joystick.html">Joystick</a>
                 <a href="controller.html">Controller</a>
@@ -39,19 +40,47 @@
 
     <!-- Prerequisites -->
     <section class="section">
-        <div class="container narrow prose">
+        <div class="container">
             <span class="overline">Step 1</span>
-            <h2 class="section-title">Prerequisites</h2>
-            <p>The simulation is built on the LARICS
-                <a href="https://github.com/larics/uav_ros_simulation" target="_blank">uav_ros_simulation</a> stack
-                (ROS Noetic, Gazebo, ArduPilot SITL, <code>ardupilot_gazebo</code>). With that workspace in place,
-                build this package once:</p>
-            <pre><code>cd ~/uav_ws
+            <h2 class="section-title">Get an environment</h2>
+            <div class="prose narrow" style="margin: 0 0 1.2rem;">
+                <p>Two ways to get a working setup. If you do not already run the LARICS workspace natively, take the
+                    container — it is the same environment, prebuilt.</p>
+            </div>
+
+            <div class="split">
+                <div class="panel">
+                    <p class="panel-heading"><i class="fab fa-docker"></i> A — Docker (recommended)</p>
+                    <div class="prose">
+                        <p>One container with ROS, Gazebo, ArduPilot SITL, mavros, the LARICS stack and this package
+                            already built. Only Docker itself is required on the host:</p>
+                        <pre><code>git clone https://github.com/JakobDomislovic/ibvs_perching.git
+cd ibvs_perching
+./docker/build.sh
+./docker/run.sh</code></pre>
+                        <p>The container drops you straight into <code>startup/sim_ibvs</code> — continue with
+                            Step&nbsp;2.</p>
+                        <a class="btn btn-primary" href="docker.html">Full Docker guide
+                            <i class="fas fa-arrow-right"></i></a>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <p class="panel-heading"><i class="fas fa-wrench"></i> B — Native workspace</p>
+                    <div class="prose">
+                        <p>The simulation is built on the LARICS
+                            <a href="https://github.com/larics/uav_ros_simulation" target="_blank">uav_ros_simulation</a>
+                            stack (ROS Noetic, Gazebo, ArduPilot SITL, <code>ardupilot_gazebo</code>). With that
+                            workspace in place, build this package once:</p>
+                        <pre><code>cd ~/uav_ws
 catkin build ibvs_perching
 source devel/setup.bash</code></pre>
-            <p>Runtime dependencies are standard ROS packages: <code>rospy</code>, <code>mavros</code>,
-                <code>cv_bridge</code> (with OpenCV's ArUco module), <code>tf</code>, and <code>tmuxinator</code> for
-                the startup session.</p>
+                        <p>Runtime dependencies are standard ROS packages: <code>rospy</code>, <code>mavros</code>,
+                            <code>cv_bridge</code> (with OpenCV's ArUco module), <code>tf</code>, and
+                            <code>tmuxinator</code> for the startup session.</p>
+                    </div>
+                </div>
+            </div>
         </div>
     </section>
 
@@ -60,7 +89,7 @@ source devel/setup.bash</code></pre>
         <div class="container narrow prose">
             <span class="overline">Step 2</span>
             <h2 class="section-title">Start everything</h2>
-            <pre><code>cd ~/uav_ws/src/ibvs_perching/startup/sim_ibvs
+            <pre><code>cd ~/uav_ws/src/ibvs_perching/startup/sim_ibvs   # in the Docker container you are already here
 ./start.sh</code></pre>
             <p>
                 <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/startup/sim_ibvs/start.sh"
@@ -305,9 +334,9 @@ rosservice call /red/ibvs/stop</code></pre>
             </div>
 
             <div class="pager">
-                <a href="index.html" class="prev">
+                <a href="docker.html" class="prev">
                     <span class="pager-label"><i class="fas fa-arrow-left"></i> Previous</span>
-                    <span class="pager-title">Home</span>
+                    <span class="pager-title">Run it in Docker</span>
                 </a>
                 <a href="joystick.html" class="next">
                     <span class="pager-label">Next <i class="fas fa-arrow-right"></i></span>

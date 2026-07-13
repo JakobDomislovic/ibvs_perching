@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="description" content="IBVS Perching — run the whole simulation in one Docker container: Gazebo, ArduPilot SITL, mavros, the LARICS stack and this package, prebuilt.">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Run it in Docker — IBVS Perching</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <nav class="nav">
+        <div class="nav-inner">
+            <a class="nav-brand" href="index.html"><i class="fas fa-crosshairs"></i> IBVS Perching</a>
+            <div class="nav-links">
+                <a href="index.html">Home</a>
+                <a href="docker.html" class="is-active">Docker</a>
+                <a href="simulation.html">Simulation</a>
+                <a href="joystick.html">Joystick</a>
+                <a href="controller.html">Controller</a>
+                <a href="code.html">Code</a>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i> GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <header class="hero">
+        <div class="hero-inner compact">
+            <span class="hero-eyebrow">Docs &middot; Zero-setup environment</span>
+            <h1 class="hero-title" style="font-size: clamp(2rem, 5vw, 2.9rem);">Run it in <span class="accent">Docker</span></h1>
+            <p class="hero-sub">One container with everything prebuilt — ROS Noetic, Gazebo, ArduPilot SITL, mavros,
+                the LARICS stack and this package. Three commands from <code>git clone</code> to a flying simulation.</p>
+        </div>
+    </header>
+
+    <!-- Prerequisites -->
+    <section class="section">
+        <div class="container narrow prose">
+            <span class="overline">Step 1</span>
+            <h2 class="section-title">Prerequisites</h2>
+            <p>You need a <strong>Linux host</strong> with
+                <a href="https://docs.docker.com/engine/install/ubuntu/" target="_blank">Docker</a> installed — nothing
+                else. No ROS, no catkin workspace, no GitHub account or SSH key: the build clones only public
+                repositories over HTTPS.</p>
+            <p>So that Gazebo, RViz and PlotJuggler can open windows on your screen, allow local containers to use
+                your X server (once per login session):</p>
+            <pre><code>xhost +local:docker</code></pre>
+            <p>Optional, for NVIDIA GPU acceleration inside the container: install the
+                <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+                    target="_blank">nvidia-container-toolkit</a>. Without a GPU everything still works — Gazebo just
+                renders in software.</p>
+        </div>
+    </section>
+
+    <!-- Build -->
+    <section class="section alt">
+        <div class="container narrow prose">
+            <span class="overline">Step 2</span>
+            <h2 class="section-title">Build the image</h2>
+            <pre><code>git clone https://github.com/JakobDomislovic/ibvs_perching.git
+cd ibvs_perching
+./docker/build.sh</code></pre>
+            <p>The first build takes a while (~20&ndash;30&nbsp;min) — it assembles the whole simulation world once, so
+                that starting it later takes seconds. Under the hood, the
+                <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/docker/Dockerfile"
+                    target="_blank"><code>Dockerfile</code></a>:</p>
+            <ol>
+                <li>starts from the prebuilt LARICS <code>uav_ros_stack</code> binary image,</li>
+                <li>clones <a href="https://github.com/larics/uav_ros_simulation" target="_blank">
+                    <code>uav_ros_simulation</code></a> <strong>pinned to a known-good commit</strong> (ArduPilot SITL,
+                    <code>ardupilot_gazebo</code>, Gazebo worlds) and builds the simulation workspace,</li>
+                <li>copies <strong>your local checkout</strong> of this package into the workspace and builds it — the
+                    image always matches the code you cloned.</li>
+            </ol>
+            <p>No NVIDIA GPU? Build the plain-Ubuntu variant instead:</p>
+            <pre><code>./docker/build.sh --nogpu</code></pre>
+        </div>
+    </section>
+
+    <!-- Run -->
+    <section class="section">
+        <div class="container narrow prose">
+            <span class="overline">Step 3</span>
+            <h2 class="section-title">Run the container and fly</h2>
+            <pre><code>./docker/run.sh          # add --enable-gpu if you built the GPU image and have the toolkit
+./start.sh               # you land directly in startup/sim_ibvs — this starts everything</code></pre>
+            <p>The container drops you straight into <code>startup/sim_ibvs</code>, so <code>./start.sh</code> is the
+                only command left — it brings up the whole tmux session (Gazebo, SITL, mavros, detector, controller).
+                From here, continue with the <a href="simulation.html">simulation guide</a>.</p>
+            <p>Detach from the container with <span class="kbd sm">Ctrl</span>+<span class="kbd sm">P</span> then
+                <span class="kbd sm">Ctrl</span>+<span class="kbd sm">Q</span>. Running <code>./docker/run.sh</code>
+                again re-attaches to the existing container — your tmux session survives.</p>
+
+            <h3 class="section-title-sub">All flags</h3>
+            <div class="tbl-wrap">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th style="width: 42%;">Command</th>
+                            <th>Effect</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>./docker/build.sh</code></td>
+                            <td>GPU-capable image (<code>nvidia/opengl</code> base) &rarr; <code>ibvs_perching:focal</code></td>
+                        </tr>
+                        <tr>
+                            <td><code>./docker/build.sh --nogpu</code></td>
+                            <td>plain Ubuntu 20.04 base &rarr; <code>ibvs_perching:focal-nogpu</code></td>
+                        </tr>
+                        <tr>
+                            <td><code>./docker/run.sh --enable-gpu</code></td>
+                            <td>adds <code>--gpus all</code> (needs nvidia-container-toolkit)</td>
+                        </tr>
+                        <tr>
+                            <td><code>./docker/run.sh --nogpu</code></td>
+                            <td>runs the <code>focal-nogpu</code> image</td>
+                        </tr>
+                        <tr>
+                            <td><code>./docker/run.sh --no-mount</code></td>
+                            <td>use the code baked into the image instead of the host checkout</td>
+                        </tr>
+                        <tr>
+                            <td><code>./docker/run.sh --run-args "..."</code></td>
+                            <td>extra arguments forwarded to <code>docker run</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- Development -->
+    <section class="section alt">
+        <div class="container narrow prose">
+            <span class="overline">Step 4</span>
+            <h2 class="section-title">Developing inside the container</h2>
+            <p>By default <code>run.sh</code> <strong>mounts your checkout</strong> over the package inside the
+                container (<code>/root/sim_ws/src/ibvs_perching</code>). Edit the Python nodes, launch files and
+                configuration on the host with your favorite editor — the changes apply the next time you (re)launch
+                the nodes, no image rebuild needed.</p>
+            <p>Only after changing <code>CMakeLists.txt</code> or <code>package.xml</code>, rebuild inside the
+                container:</p>
+            <pre><code>catkin build ibvs_perching</code></pre>
+
+            <div class="callout">
+                <div class="callout-icon"><i class="fas fa-circle-info"></i></div>
+                <div>
+                    <p class="callout-title">Flags apply only when the container is created</p>
+                    <p>Mounts and GPU flags are set the <em>first</em> time <code>run.sh</code> creates the container;
+                        afterwards it always re-attaches to the existing one. To start fresh (e.g. to change mount
+                        options): <code>docker rm ibvs_perching_focal</code>, then <code>./docker/run.sh</code> again.</p>
+                </div>
+            </div>
+
+            <h3 class="section-title-sub">Updating the pinned simulation</h3>
+            <p>The LARICS simulation stack is pinned via the <code>UAV_ROS_SIM_COMMIT</code> build argument in the
+                <a href="https://github.com/JakobDomislovic/ibvs_perching/blob/master/docker/Dockerfile"
+                    target="_blank"><code>Dockerfile</code></a>, so every student builds the exact same environment.
+                To try a newer upstream commit:</p>
+            <pre><code>./docker/build.sh --build-args "--build-arg UAV_ROS_SIM_COMMIT=&lt;sha&gt;"</code></pre>
+            <p>If it works, make it permanent by updating the default value in the <code>Dockerfile</code>.</p>
+        </div>
+    </section>
+
+    <!-- Troubleshooting -->
+    <section class="section">
+        <div class="container">
+            <span class="overline">When things go wrong</span>
+            <h2 class="section-title">Troubleshooting</h2>
+
+            <div class="tbl-wrap">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th style="width: 32%;">Symptom</th>
+                            <th>Cause &amp; fix</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Gazebo window never appears / <code>cannot connect to X server</code></td>
+                            <td>The container is not allowed to use your display. Run
+                                <code>xhost +local:docker</code> on the <strong>host</strong> (needed once per login
+                                session), then try again.</td>
+                        </tr>
+                        <tr>
+                            <td><code>could not select device driver "nvidia"</code></td>
+                            <td>You passed <code>--enable-gpu</code> without the nvidia-container-toolkit installed.
+                                Install it, or simply run without the flag.</td>
+                        </tr>
+                        <tr>
+                            <td>Changed a flag (mount, GPU) but nothing changed</td>
+                            <td><code>run.sh</code> re-attached to the existing container — flags only apply on
+                                creation. <code>docker rm ibvs_perching_focal</code> and run again.</td>
+                        </tr>
+                        <tr>
+                            <td>Edits on the host don't show up in the container</td>
+                            <td>You are running with <code>--no-mount</code>, or the container was created before the
+                                mount existed. Recreate it: <code>docker rm ibvs_perching_focal</code> &rarr;
+                                <code>./docker/run.sh</code>.</td>
+                        </tr>
+                        <tr>
+                            <td>Gazebo is very slow / camera image is black</td>
+                            <td>Software rendering. Build the GPU image (default <code>build.sh</code>), install the
+                                nvidia-container-toolkit and run with <code>--enable-gpu</code>.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="pager">
+                <a href="index.html" class="prev">
+                    <span class="pager-label"><i class="fas fa-arrow-left"></i> Previous</span>
+                    <span class="pager-title">Home</span>
+                </a>
+                <a href="simulation.html" class="next">
+                    <span class="pager-label">Next <i class="fas fa-arrow-right"></i></span>
+                    <span class="pager-title">Running the simulation</span>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-logos">
+                <div class="logo-chip"><img src="./logo/FER_logo.png" alt="FER" style="height: 70px; width: auto;"></div>
+                <div class="logo-chip"><img src="./logo/Larics_logo.png" alt="LARICS" style="height: 38px; width: auto;"></div>
+            </div>
+            <p><strong>IBVS Perching</strong> — Image-Based Visual Servoing for UAV Perching</p>
+            <p class="fine">
+                &copy; 2026 Jakob Domislovic · University of Zagreb · LARICS<br>
+                <a href="https://github.com/JakobDomislovic/ibvs_perching" target="_blank"><i class="fab fa-github"></i>
+                    GitHub Repository</a>
+            </p>
+        </div>
+    </footer>
+
+</body>
+
+</html>
