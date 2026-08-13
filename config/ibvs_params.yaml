@@ -6,6 +6,12 @@
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
+# NOTE: ~image_width/~image_height (the camera resolution -- the only thing
+# the controller needs to know about the camera) are NOT set here. They are
+# set ONCE, together, on all three nodes (this controller, aruco_detector.py,
+# mock_ar_tag_publisher.py) via the image_width/image_height args in
+# launch/ibvs_perching.launch, so the three can never drift out of sync.
+
 # ---------------------------------------------------------------------------
 # Mid-flight engagement (fly manually with the keyboard joystick, then let
 # IBVS take over). engage_on_target lets the controller seize GUIDED_NOGPS
@@ -31,27 +37,28 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] CLIMB ends when odometry z reaches this
 
-# Desired target height ABOVE the vehicle. The AR tag lies on the floor, so
-# it is BELOW the vehicle: negative value. -0.5 => hover 0.5 m above the tag
-# (world z ~0.5 with the tag plate on the ground at z~0.02). Vertical motion
-# only happens when the vision module provides a depth (point.z > 0).
-target_z: -0.5
-depth_guess: 2.0              # [m] assumed target distance when the vision
-                              # module sends no depth (point.z = 0); only
-                              # scales X-Y gains, never causes Z motion
+# No depth from the vision module -> no standoff to regulate toward, and
+# FOR NOW no depth-free descent strategy is enabled either: ALIGN/ALIGNED
+# hold the ODOMETRY height the vehicle was at when servoing started
+# (latched in transition(), NOT takeoff_height), regulated below rather
+# than trusting an open-loop hover_thrust to hold still. Centering the
+# target laterally does not by itself bring the vehicle any closer to it
+# (see README limitations for what adding descent back would take).
+kp_alt_hold: 0.3               # thrust delta per meter of height error
+kv_alt_hold: 0.2               # thrust delta per m/s of climb-rate damping
 
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the tag position error
-# (expressed in the body FLU frame: x-forward, y-left, z-up):
-#   desired_tilt = PID_xy(tag error)                  (clamped to max_tilt)
+# X-Y axis -- closed-loop IBVS cascade on the target's pixel error, expressed
+# as a FRACTION of the half-frame (0 = centered, +-1 = frame edge; see
+# target_callback in ibvs_controller.py), in the body FLU frame convention
+# (x-forward, y-left, z-up):
+#   desired_tilt = PID_xy(frame-fraction error)       (clamped to max_tilt)
 #   body_rate    = kp_att * (desired_tilt - current_tilt)
 # A raw rate command proportional to position error is UNSTABLE (the rate
 # integrates into an unbounded tilt); the attitude inner loop is required.
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired relative tag x (forward) offset [m]
-target_y: 0.0                 # desired relative tag y (left) offset [m]
-descend_xy_gate: 0.25         # [m] descend only while centered within this radius
-                              # (keeps the tag inside the shrinking camera FOV)
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
 
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
 kp_att: 1.5                   # body rate per rad of attitude error [1/s]
@@ -61,35 +68,37 @@ kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]; HOVER and
                               # wherever servoing stopped) -- level attitude
                               # alone drifts away on attitude trim bias
 kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
+                              # (kp_alt_hold/kv_alt_hold above are the Z-axis
+                              # equivalent, for ALIGN/ALIGNED's height hold)
 
 # ---------------------------------------------------------------------------
 # PID gains. I and D start at 0 (pure P) -- raise them only when tuning.
-# The D-term uses body velocity from odometry (equivalent to velocity
-# damping; kd_xy ~ 0.25 was flight-tested and smooths the approach).
+# The D-term uses body velocity from odometry as a damping proxy -- with a
+# metric error this was an EXACT derivative; with a frame-fraction error
+# (no depth) it's only approximate, since the same velocity produces a
+# bigger apparent pixel motion the closer the vehicle is to the target.
 # i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
+# Values below carried over numerically from the old metric gains as a
+# STARTING POINT ONLY -- the error is now dimensionless (roughly -1..1
+# instead of unbounded meters), so these need retuning by flying it.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.15                    # desired tilt per meter of tag error [rad/m]
-  ki: 0.002                   # [rad per m*s]
-  kd: 0.15                    # [rad per m/s] -- NEEDED for the camera descent:
-                              # with kd 0 the undamped X-Y oscillation outruns
-                              # the shrinking FOV and the tag leaves the frame
+  kp: 0.15                    # desired tilt per unit of frame-fraction error [rad]
+  ki: 0.002                   # [rad/s]
+  kd: 0.15                    # [rad per unit/s] -- damps the X-Y approach so it
+                              # doesn't oscillate (flight-tested with descent
+                              # enabled; kept as the starting point)
   i_max: 0.05                 # [rad] max integral contribution
-
-pid_z:
-  kp: 0.15                    # climb-rate delta per meter of tag z error [1/m]
-  ki: 0.001                   # [1 per m*s]
-  kd: 0.0                     # [1 per m/s]
-  i_max: 0.1                  # max integral contribution
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback timeout if takeoff_height is never reached
-align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_tolerance: 0.08         # frame-fraction error norm below this counts as
+                              # "aligned" -- retune by flying it, this replaces
+                              # the old metric [m] tolerance
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
 tag_timeout: 0.5              # [s] no tag message within this time -> TAG_LOST
-                              # (short: at 30 fps detection, 0.5 s of silence is
-                              # a real loss, and stale-data descent near the
-                              # ground must stop quickly)
+                              # (short: at 30 fps detection, 0.5 s of silence
+                              # is a real loss, not a dropped frame)

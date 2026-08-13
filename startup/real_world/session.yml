@@ -15,8 +15,10 @@ windows:
       layout: tiled
       panes:
         # the vision module (aruco_detector) subscribes to
-        #   /$UAV_NAMESPACE/camera/color/image_raw + camera/color/camera_info
-        # -- adapt this pane to the camera actually mounted on the UAV
+        #   /$UAV_NAMESPACE/camera/color/image_raw
+        # (no camera_info / calibration needed -- pixel-only interface,
+        # see ibvs_perching README section 3) -- adapt this pane to the
+        # camera actually mounted on the UAV
         - history -s "ROS_NAMESPACE=$UAV_NAMESPACE roslaunch realsense2_camera rs_camera.launch"
         - history -s "rosrun rqt_image_view rqt_image_view /$UAV_NAMESPACE/ibvs/debug_image"
   - joystick:
@@ -49,11 +51,15 @@ windows:
           roslaunch ibvs_perching ibvs_perching.launch
           config:=$(pwd)/custom_config/ibvs_params_rw.yaml
           spawn_ar_tag:=false
-        # engagement smoke test: call ibvs/start (the "button"), then an
-        # all-zero point engages GUIDED_NOGPS; it goes stale within
-        # tag_timeout, so the vehicle just HOLDS position (this is the
-        # position_hold replacement -- fly, press button, publish, hands off)
-        - history -s "rostopic pub --once /$UAV_NAMESPACE/ibvs/target_point geometry_msgs/PointStamped '{}'"
+        # engagement smoke test: call ibvs/start (the "button"), then a
+        # point at the FRAME CENTER (image_width/2, image_height/2 --
+        # 320,240 for the default 640x480) engages GUIDED_NOGPS with zero
+        # lateral error; it goes stale within tag_timeout, so the vehicle
+        # just HOLDS position (this is the position_hold replacement --
+        # fly, press button, publish, hands off). Do NOT publish an
+        # all-zero point here: (0,0) is the top-left PIXEL corner, not the
+        # center, and would briefly command a real tilt toward it.
+        - history -s "rostopic pub --once /$UAV_NAMESPACE/ibvs/target_point geometry_msgs/PointStamped '{point: {x: 320, y: 240}}'"
         - history -s "rosservice call /$UAV_NAMESPACE/ibvs/stop"
         - history -s "rosservice call /$UAV_NAMESPACE/ibvs/start"
         - history -s "rosservice call /$UAV_NAMESPACE/mavros/cmd/arming false"

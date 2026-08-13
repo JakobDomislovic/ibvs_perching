@@ -18,30 +18,35 @@ engage_needs_start: true      # ...but only after ibvs/start (joystick button)
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
+# NOTE: ~image_width/~image_height (the camera resolution) are NOT set here
+# -- set them, together, on the controller AND the real detector node via
+# the launch file's image_width/image_height args, so they can't drift.
+
 # ---------------------------------------------------------------------------
-# Z axis -- climb rate through the AttitudeTarget "thrust" field.
+# Z axis -- climb rate through the AttitudeTarget "thrust" field. No depth
+# from the vision module -> no standoff to regulate toward, and FOR NOW no
+# depth-free descent strategy is enabled either: ALIGN/ALIGNED hold the
+# ODOMETRY height the vehicle was at when servoing started (latched the
+# moment engagement happens -- see ibvs_controller.py transition() -- i.e.
+# wherever the safety pilot was flying when they pressed the IBVS button,
+# NOT takeoff_height, which this flow never even uses). Centering the
+# target laterally does not by itself bring the vehicle any closer to it.
 # ---------------------------------------------------------------------------
 hover_thrust: 0.5             # zero-climb-rate ("hover") command
 climb_thrust: 0.52            # only used by the ibvs/takeoff CLIMB path
 thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
-
-# Desired target height ABOVE the vehicle (negative = target below).
-# -0.5 => hover 0.5 m above the tag. Vertical motion only happens when the
-# vision module provides a depth (point.z > 0).
-target_z: -0.5
-depth_guess: 2.0              # [m] assumed target distance when the vision
-                              # module sends no depth (point.z = 0); only
-                              # scales X-Y gains, never causes Z motion
+kp_alt_hold: 0.3               # thrust delta per meter of height error
+kv_alt_hold: 0.2               # thrust delta per m/s of climb-rate damping
 
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the tag position error:
-#   desired_tilt = PID_xy(tag error), body_rate = kp_att * (tilt error)
+# X-Y axis -- closed-loop IBVS cascade on the target's pixel error, as a
+# FRACTION of the half-frame (0 = centered, +-1 = frame edge):
+#   desired_tilt = PID_xy(frame-fraction error), body_rate = kp_att * (tilt error)
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired relative tag x (forward) offset [m]
-target_y: 0.0                 # desired relative tag y (left) offset [m]
-descend_xy_gate: 0.25         # [m] descend only while centered within this radius
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
 
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
 kp_att: 1.5                   # body rate per rad of attitude error [1/s]
@@ -50,25 +55,22 @@ kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]
 kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
 
 # ---------------------------------------------------------------------------
-# PID gains (flight-tested starting point, same as simulation)
+# PID gains -- carried over numerically from the old metric gains as a
+# STARTING POINT ONLY. The error is now dimensionless (frame-fraction,
+# roughly -1..1 instead of unbounded meters): retune by flying it.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.10                    # desired tilt per meter of tag error [rad/m]
-  ki: 0.0                     # [rad per m*s]
-  kd: 0.15                    # [rad per m/s] velocity damping -- keep > 0
+  kp: 0.10                    # desired tilt per unit of frame-fraction error [rad]
+  ki: 0.0                     # [rad/s]
+  kd: 0.15                    # [rad per unit/s] velocity damping -- keep > 0
   i_max: 0.05                 # [rad] max integral contribution
-
-pid_z:
-  kp: 0.1                     # climb-rate delta per meter of tag z error [1/m]
-  ki: 0.0                     # [1 per m*s]
-  kd: 0.0                     # [1 per m/s]
-  i_max: 0.1                  # max integral contribution
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
-align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_tolerance: 0.08         # frame-fraction error norm below this counts as
+                              # "aligned" -- retune by flying it
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST

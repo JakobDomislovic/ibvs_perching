@@ -9,25 +9,29 @@ switching (GUIDED_NOGPS) are done by the ibvs/takeoff service -- this node
 only ever streams AttitudeTarget setpoints.
 
 VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
-    The controller is agnostic to WHAT is being tracked. Any vision module
-    (ArUco today, anything else tomorrow) publishes the point it wants
+    The controller is agnostic to WHAT is being tracked and needs NO camera
+    calibration. Any vision module (ArUco today, a plain object detector
+    tomorrow) publishes the PIXEL coordinates of the point it wants
     centered in the camera image:
-        point.x  normalized horizontal offset from the image center,
-                 (u - cx) / fx, positive RIGHT in the image
-        point.y  normalized vertical offset from the image center,
-                 (v - cy) / fy, positive DOWN in the image
-        point.z  distance to the target along the optical axis [m],
-                 or 0.0 if unknown
+        point.x  pixel column (u), 0 .. image_width
+        point.y  pixel row (v), 0 .. image_height
+        point.z  unused, always 0.0 -- there is no depth (see below)
     Publishing on this topic at all means "target in sight": the state
-    machine shows TAG_IN_SIGHT and ibvs/start will engage. The controller
-    steers so the point goes to the image center (target_x/target_y offsets
-    are available). Vertical motion toward the target happens ONLY when
-    point.z carries a real distance; with z=0 the controller centers the
-    point while holding altitude.
+    machine shows TAG_IN_SIGHT and ibvs/start will engage. ~image_width /
+    ~image_height must be set (once, in the launch file) to the SAME
+    resolution the vision module is using, so the controller can find the
+    frame center.
 
     The camera is assumed rigidly mounted looking straight down with image
     RIGHT = body FORWARD (the kopterworx down_facing_camera mount): a point
-    seen at (+x, +y) in the image lies (forward, right) of the vehicle.
+    seen right-of-center in the image lies to the right of the vehicle.
+
+    NO DEPTH: a bare pixel center (no marker size, no calibrated
+    intrinsics) carries no distance information, so the controller cannot
+    regulate a metric standoff above the target. FOR NOW it does not
+    descend at all: ALIGN/ALIGNED only center the target laterally and
+    hold the odometry height the vehicle was at when servoing started
+    -- see compute_thrust and the README limitations.
 
 IMPORTANT -- how ArduPilot interprets the "thrust" field:
     In GUIDED / GUIDED_NOGPS mode ArduPilot treats AttitudeTarget.thrust
@@ -40,26 +44,36 @@ IMPORTANT -- how ArduPilot interprets the "thrust" field:
     only takes off when we command thrust ABOVE 0.5 (climb_thrust).
 
 Control split:
-  - Z:   climb-rate control through the thrust field. During CLIMB
-         (takeoff) a fixed climb_thrust is sent. During ALIGN/ALIGNED a
-         PID on the tag's relative height regulates toward target_z:
-         thrust = hover + PID_z(tag_z - target_z), clamped to
-         [thrust_min, thrust_max].
+  - Z:   FOR NOW, no descent -- there is no depth to regulate against, and
+         no open-loop descent strategy is enabled yet either. CLIMB sends
+         climb_thrust (the takeoff); WAIT_ARM/HOVER/TAG_IN_SIGHT send a
+         plain hover_thrust. ALIGN/ALIGNED hold the odometry height
+         latched when servoing started (hold_height, see transition()),
+         regulated the same way as the X-Y position hold below (P term +
+         velocity damping) rather than trusting hover_thrust alone to
+         hold still open-loop. Centering the target laterally does not
+         bring the vehicle any closer to it.
   - X-Y: closed-loop IBVS as a CASCADE. A raw body-rate command
          proportional to position error is unstable (the rate integrates
          into an unbounded tilt -- flight tested, it flips the vehicle),
          so instead:
-             desired_tilt = PID_xy(tag position error)   (clamped small)
+             desired_tilt = PID_xy(target error)   (clamped small)
              body_rate    = kp_att * (desired_tilt - current_tilt)
-         Attitude and body velocity are taken from odometry. All in the
-         body FLU convention (mavros converts FLU->FRD for MAVLink).
-         Sign conventions (FLU, ROS euler): +pitch = nose down = +x accel,
-         +roll = right side down = -y accel.
+         The error is the target's pixel offset from the frame center,
+         expressed as a FRACTION of the half-frame (independent of
+         image_width/image_height, so gains don't need retuning if the
+         camera resolution changes). Attitude and body velocity are taken
+         from odometry. All in the body FLU convention (mavros converts
+         FLU->FRD for MAVLink). Sign conventions (FLU, ROS euler): +pitch =
+         nose down = +x accel, +roll = right side down = -y accel.
 
-         The PID derivative term uses body velocity (d(err)/dt = -vel for
-         a stationary tag) instead of numerically differentiating the
-         detection -- same information, far less noise. With kd > 0 it is
-         exactly the velocity damping term of a classic tilt cascade.
+         The PID derivative term uses body velocity as a damping proxy.
+         With a metric error this was EXACT (d(err)/dt = -vel for a
+         stationary tag); with a frame-fraction error it is only an
+         approximation, since the same velocity produces a bigger apparent
+         pixel motion the closer the vehicle is to the target -- a scaling
+         that came for free with a real depth measurement and cannot be
+         corrected without one.
 
 State machine (this is what makes the controller "modal"):
 
@@ -115,8 +129,8 @@ Thrust ("climb rate") per state:
     WAIT_ARM  hover_thrust (neutral; ignored anyway while disarmed)
     CLIMB     climb_thrust (constant climb -> this IS the takeoff)
     HOVER     hover_thrust (hold altitude, wait for ibvs/start)
-    ALIGN     PID on tag z error, clamped
-    ALIGNED   PID on tag z error, clamped
+    ALIGN     regulated toward hold_height (centering only, no descent for now)
+    ALIGNED   regulated toward hold_height (centering only, no descent for now)
     TAG_LOST  hover_thrust (hold altitude, wait for re-detection)
 """
 
@@ -186,20 +200,30 @@ class IbvsController:
         self.control_rate = rospy.get_param('~control_rate', 20.0)
         self.dt = 1.0 / self.control_rate
 
-        # Z axis ("climb rate" through the thrust field)
+        # Camera resolution -- the ONLY thing the controller needs to know
+        # about the camera (no intrinsics, no calibration). Must match the
+        # vision module publishing ibvs/target_point (set once, together,
+        # in the launch file).
+        self.image_width = rospy.get_param('~image_width', 640)
+        self.image_height = rospy.get_param('~image_height', 480)
+
+        # Z axis ("climb rate" through the thrust field). No depth is
+        # available, so there is no standoff to regulate toward, and FOR
+        # NOW no descent strategy is enabled either -- ALIGN/ALIGNED just
+        # hold hover_thrust (see compute_thrust).
         self.hover_thrust = rospy.get_param('~hover_thrust', 0.5)
         self.climb_thrust = rospy.get_param('~climb_thrust', 0.6)
         self.thrust_min = rospy.get_param('~thrust_min', 0.35)
         self.thrust_max = rospy.get_param('~thrust_max', 0.7)
-        self.target_z = rospy.get_param('~target_z', -0.5)
         self.takeoff_height = rospy.get_param('~takeoff_height', 2.0)
-        # assumed distance to the target when the vision module gives no
-        # depth (point.z = 0); only scales the X-Y gains, never used for Z
-        self.depth_guess = rospy.get_param('~depth_guess', 2.0)
-        # descend only while laterally centered on the tag: descending
-        # off-center shrinks the camera FOV faster than the X-Y loop
-        # converges and the tag falls out of frame (flight-tested)
-        self.descend_xy_gate = rospy.get_param('~descend_xy_gate', 0.25)
+        # Altitude hold during ALIGN/ALIGNED, regulated toward hold_height
+        # (latched at the ODOMETRY height when servoing starts -- see
+        # transition() -- NOT takeoff_height, which CLIMB may over/undershoot,
+        # and not simply an open-loop hover_thrust, which can drift over an
+        # arbitrarily long wait in HOVER before ibvs/start is called). Same
+        # P+damping structure as the X-Y position hold below.
+        self.kp_alt_hold = rospy.get_param('~kp_alt_hold', 0.3)
+        self.kv_alt_hold = rospy.get_param('~kv_alt_hold', 0.2)
 
         # X-Y axis (IBVS cascade: PID on tag error -> desired tilt -> body rate)
         self.target_x = rospy.get_param('~target_x', 0.0)
@@ -220,16 +244,8 @@ class IbvsController:
         ki_xy = rospy.get_param('~pid_xy/ki', 0.0)
         kd_xy = rospy.get_param('~pid_xy/kd', 0.0)
         i_max_xy = rospy.get_param('~pid_xy/i_max', 0.05)
-        kp_z = rospy.get_param('~pid_z/kp', 0.2)
-        ki_z = rospy.get_param('~pid_z/ki', 0.0)
-        kd_z = rospy.get_param('~pid_z/kd', 0.0)
-        i_max_z = rospy.get_param('~pid_z/i_max', 0.1)
-
         self.pid_x = Pid(kp_xy, ki_xy, kd_xy, -self.max_tilt, self.max_tilt, i_max_xy)
         self.pid_y = Pid(kp_xy, ki_xy, kd_xy, -self.max_tilt, self.max_tilt, i_max_xy)
-        self.pid_z = Pid(kp_z, ki_z, kd_z,
-                         self.thrust_min - self.hover_thrust,
-                         self.thrust_max - self.hover_thrust, i_max_z)
 
         # State machine timing / thresholds
         self.climb_settle_time = rospy.get_param('~climb_settle_time', 3.0)
@@ -269,16 +285,18 @@ class IbvsController:
 
         self.armed = False
         self.mode = ''
-        # target reconstructed from the vision module's image point, in the
-        # body FLU frame: t_x forward, t_y left; t_z is None without a depth
-        # hint (then only lateral centering runs, no climb/descent)
+        # target error reconstructed from the vision module's pixel point,
+        # as a fraction of the half-frame: t_x forward, t_y left (0 = the
+        # target is exactly centered). No depth -- see module docstring.
         self.t_x = None
         self.t_y = None
-        self.t_z = None
         self.last_tag_time = None
         self.last_odom = None
         # (x, y) in the local frame that HOVER/TAG_LOST hold on to
         self.hold_position = None
+        # odometry z that ALIGN/ALIGNED hold on to (latched on entering
+        # ALIGN -- see transition() and compute_thrust)
+        self.hold_height = None
 
         self.setpoint_pub = rospy.Publisher(
             'mavros/setpoint_raw/attitude', AttitudeTarget, queue_size=1)
@@ -354,17 +372,15 @@ class IbvsController:
         self.mode = msg.mode
 
     def target_callback(self, msg):
-        """Vision-module point -> pseudo target position in body FLU.
-
-        Down camera with image right = body forward:
-            direction_body = (point.x, -point.y, -1) * depth
-        Without a depth hint the lateral error is scaled by depth_guess --
-        the loop still centers the point, gains just aren't depth-adapted.
+        """Vision-module pixel point -> lateral error, as a fraction of the
+        half-frame (independent of image_width/image_height, so gains and
+        tolerances don't need retuning if the camera resolution changes).
+        Down camera with image right = body forward.
         """
-        depth = msg.point.z if msg.point.z > 0.0 else self.depth_guess
-        self.t_x = depth * msg.point.x
-        self.t_y = -depth * msg.point.y
-        self.t_z = -msg.point.z if msg.point.z > 0.0 else None
+        norm_x = (msg.point.x - self.image_width / 2.0) / (self.image_width / 2.0)
+        norm_y = (msg.point.y - self.image_height / 2.0) / (self.image_height / 2.0)
+        self.t_x = norm_x
+        self.t_y = -norm_y
         self.last_tag_time = rospy.Time.now()
 
         # real world: this point is the "go autonomous" signal
@@ -411,11 +427,14 @@ class IbvsController:
         if new_state != self.state:
             rospy.loginfo("ibvs_controller: %s -> %s", self.state, new_state)
             # entering closed-loop servoing from a non-servoing state:
-            # start the PIDs fresh (drops any stale integral)
+            # start the PIDs fresh (drops any stale integral), and latch
+            # the CURRENT odometry height as the Z hold target -- NOT
+            # takeoff_height (see compute_thrust)
             if new_state == ALIGN and self.state not in (ALIGN, ALIGNED):
                 self.pid_x.reset()
                 self.pid_y.reset()
-                self.pid_z.reset()
+                if self.last_odom is not None:
+                    self.hold_height = self.last_odom.pose.pose.position.z
             # Latch the spot the hold states keep: the takeoff point when
             # CLIMB starts, or wherever the vehicle is when servoing stops /
             # the tag is lost. HOVER <-> TAG_IN_SIGHT keep the same latch
@@ -489,32 +508,31 @@ class IbvsController:
         return ready_to_fly
 
     def compute_thrust(self):
-        """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
+        """Climb-rate command via the thrust field (0.5 = zero climb rate).
+
+        No depth means no standoff to regulate toward, and no depth-free
+        descent strategy is enabled yet either (see the README
+        limitations) -- centering the target laterally does not by itself
+        bring the vehicle any closer. ALIGN/ALIGNED instead hold the
+        ODOMETRY height the vehicle was at when servoing started
+        (hold_height, latched in transition()) -- NOT takeoff_height,
+        which CLIMB may over/undershoot, and not just an open-loop
+        hover_thrust, which can drift over an arbitrarily long wait in
+        HOVER before ibvs/start is called. Every other non-CLIMB state
+        still just sends hover_thrust.
+        """
         if self.state == CLIMB:
             return self.climb_thrust
 
-        # vertical motion toward the target requires a depth hint from the
-        # vision module (point.z > 0); a bare image point only centers X-Y
-        if self.state in (ALIGN, ALIGNED) and self.t_z is not None:
-            # t_z is the target's height above the vehicle (body FLU);
-            # negative for a target below. Regulate toward the standoff.
-            z_err = self.t_z - self.target_z
-            z_err_dot = 0.0
-            if self.last_odom is not None:
-                # stationary target: d(t_z)/dt = -climb velocity
-                z_err_dot = -self.last_odom.twist.twist.linear.z
-            delta = self.pid_z.update(z_err, z_err_dot, self.dt)
-
-            # landing funnel: never descend while laterally off-center,
-            # otherwise the target exits the shrinking camera FOV
-            lateral_error = ((self.target_x - self.t_x) ** 2 +
-                             (self.target_y - self.t_y) ** 2) ** 0.5
-            if delta < 0.0 and lateral_error > self.descend_xy_gate:
-                delta = 0.0
-
+        if (self.state in (ALIGN, ALIGNED) and
+                self.hold_height is not None and self.last_odom is not None):
+            z_err = self.hold_height - self.last_odom.pose.pose.position.z
+            vz = self.last_odom.twist.twist.linear.z
+            delta = clamp(self.kp_alt_hold * z_err - self.kv_alt_hold * vz,
+                          self.thrust_min - self.hover_thrust,
+                          self.thrust_max - self.hover_thrust)
             return self.hover_thrust + delta
 
-        # WAIT_ARM (ignored while disarmed) and TAG_LOST: hold altitude.
         return self.hover_thrust
 
     def compute_body_rates(self):
@@ -554,7 +572,7 @@ class IbvsController:
                                  -self.max_tilt, self.max_tilt)
 
         if self.state in (ALIGN, ALIGNED) and self.t_x is not None:
-            # target position error in body FLU (from the image point)
+            # target error as a frame-fraction (from the pixel point)
             err_x = self.target_x - self.t_x
             err_y = self.target_y - self.t_y
             error_norm = (err_x ** 2 + err_y ** 2) ** 0.5

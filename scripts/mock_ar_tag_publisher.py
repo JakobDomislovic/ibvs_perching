@@ -4,19 +4,24 @@
 Mock vision module for the ibvs_perching demo (no camera needed).
 
 Speaks the same VISION MODULE INTERFACE as aruco_detector.py: publishes
-`ibvs/target_point` (geometry_msgs/PointStamped) with the normalized image
-coordinates a down-facing camera WOULD see for a target at a fixed world
-position, computed from real mavros odometry:
+`ibvs/target_point` (geometry_msgs/PointStamped) with the PIXEL coordinates
+a down-facing camera WOULD see for a target at a fixed world position,
+computed from real mavros odometry plus an assumed ~horizontal_fov -- the
+one thing a real detector would NOT need, since this one has no camera or
+image at all and has to fake a plausible projection from scratch:
 
-    point.x  (u - cx)/fx equivalent, positive right in the image
-    point.y  (v - cy)/fy equivalent, positive down in the image
-    point.z  distance along the optical axis [m]
+    point.x  pixel column (u), 0 .. image_width
+    point.y  pixel row (v), 0 .. image_height
+    point.z  unused, always 0.0 (no depth -- see ibvs_controller.py)
 
 Down camera with image right = body forward: a target at body FLU
-(bx, by, bz) sits at optical (bx, -by, -bz), so
-    point.x = bx / -bz,  point.y = -by / -bz,  point.z = -bz
-Only publishes while the target is actually below the vehicle (in "view"),
-so the TAG_IN_SIGHT logic behaves like with a real detector.
+(bx, by, bz) sits at optical (bx, -by, -bz). depth = -bz is used ONLY
+internally, to project the target into the image and decide whether it is
+"in view" -- exactly the privileged ground-truth information a real
+detector does not have, which is why this stays a MOCK and never appears
+on the published topic. Only publishes while the target is actually below
+the vehicle (in "view"), so the TAG_IN_SIGHT logic behaves like with a
+real detector.
 """
 
 import math
@@ -27,6 +32,10 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PointStamped
 
 
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
 class MockArTagPublisher:
 
     def __init__(self):
@@ -34,6 +43,13 @@ class MockArTagPublisher:
         self.odom_topic = rospy.get_param('~odom_topic', 'mavros/local_position/odom')
         self.tag_world_position = rospy.get_param('~tag_world_position', [0.0, 0.0, 0.02])
         self.min_depth = rospy.get_param('~min_depth', 0.1)
+        # must match the controller's ~image_width/~image_height (set once,
+        # together, in the launch file)
+        self.image_width = rospy.get_param('~image_width', 640)
+        self.image_height = rospy.get_param('~image_height', 480)
+        # assumed camera FOV, used only to fake a believable pixel position
+        # (default: the kopterworx down-facing camera, 80 deg horizontal)
+        self.horizontal_fov = rospy.get_param('~horizontal_fov', 1.3962634)
 
         self.latest_odom = None
 
@@ -71,16 +87,25 @@ class MockArTagPublisher:
         body_y = -sin_yaw * dx + cos_yaw * dy
         body_z = dz
 
-        depth = -body_z          # optical axis points down
+        depth = -body_z          # optical axis points down; used only here,
+                                  # never published (see module docstring)
         if depth < self.min_depth:
             return               # target not below the vehicle -> not "in view"
+
+        # tan(angle) / tan(half_fov) -> [-1, 1] fraction of the half-frame,
+        # matching exactly how the controller decodes pixels back to a
+        # fraction (per-axis, using image_width/image_height -- see
+        # ibvs_controller.py's target_callback)
+        tan_half_fov = math.tan(self.horizontal_fov / 2.0)
+        norm_x = clamp((body_x / depth) / tan_half_fov, -1.0, 1.0)
+        norm_y = clamp((-body_y / depth) / tan_half_fov, -1.0, 1.0)
 
         msg = PointStamped()
         msg.header.stamp = rospy.Time.now()
         msg.header.frame_id = 'camera'
-        msg.point.x = body_x / depth
-        msg.point.y = -body_y / depth
-        msg.point.z = depth
+        msg.point.x = float(round(self.image_width / 2.0 * (1.0 + norm_x)))
+        msg.point.y = float(round(self.image_height / 2.0 * (1.0 + norm_y)))
+        msg.point.z = 0.0
         self.point_pub.publish(msg)
 
 
