@@ -22,7 +22,7 @@ mission_mode: land
 
 # Image->body sign per axis (absorb the camera flip + detector pixel-sign
 # convention). Defaults suit the down-facing landing camera; the up-facing
-# perch camera typically needs one or both at -1.0 -- VERIFY ON THE BENCH.
+# perch camera typically needs one or both at -1.0 -- VERIFY before flying.
 image_x_sign: 1.0
 image_y_sign: 1.0
 
@@ -33,9 +33,8 @@ image_y_sign: 1.0
 # RCIn.channels (transmitter channel N -> index N-1). SET THIS to your spare
 # AUX switch and confirm rc/in shows it toggling ~1000<->2000 us.
 # ---------------------------------------------------------------------------
-rc_gate_enabled: false        # DISABLED for now (bench tests, no flying) --
-                              # set true to require the RC switch before any
-                              # setpoints are sent to the FCU
+rc_gate_enabled: true        # require the RC master switch ON before any
+                              # setpoints are sent to the FCU (safety gate)
 rc_gate_channel: 6            # 0-based -> transmitter channel 7 (CHANGE ME)
 rc_gate_threshold: 1500.0     # [us] above = ON
 rc_gate_invert: false         # true if the switch reads high when OFF

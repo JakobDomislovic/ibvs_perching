@@ -224,7 +224,7 @@ class IbvsController:
         # not: a down camera (landing) and an up camera (perching) map the
         # same image error to OPPOSITE body directions. These two knobs
         # absorb both the camera flip and the detector's pixel-sign
-        # convention -- set them on the bench so a target off to one side
+        # convention -- set them so a target off to one side
         # produces a correction TOWARD it (negative feedback). Defaults suit
         # the down-facing landing camera.
         self.image_x_sign = rospy.get_param('~image_x_sign', 1.0)

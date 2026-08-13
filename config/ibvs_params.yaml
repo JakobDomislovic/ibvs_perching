@@ -19,7 +19,7 @@ mission_mode: land
 # Image->body sign per axis (see ibvs_controller.py). The vision interface is
 # fixed (point.x positive RIGHT, point.y positive DOWN); these absorb the
 # camera flip (down vs up mount) and the detector's pixel-sign convention.
-# Tune on the bench so a target off to one side produces a correction TOWARD
+# Verify so a target off to one side produces a correction TOWARD
 # it. Defaults suit the down-facing landing camera; the up-facing perch
 # camera typically needs one or both flipped to -1.0 -- verify before flight.
 image_x_sign: 1.0
