@@ -52,8 +52,14 @@ Control split:
          so instead:
              desired_tilt = PID_xy(tag position error)   (clamped small)
              body_rate    = kp_att * (desired_tilt - current_tilt)
-         Attitude and body velocity are taken from odometry. All in the
-         body FLU convention (mavros converts FLU->FRD for MAVLink).
+         Attitude comes from odometry when available and from
+         mavros/imu/data otherwise, so the loop still closes with no EKF
+         position solution (no GPS / OptiTrack -- the real-world UDP
+         setup). Body velocity has no such fallback: without odometry the
+         damping term is zero and the tag loop is P+I only, and the
+         position-hold states command level attitude instead of holding a
+         point. All in the body FLU convention (mavros converts FLU->FRD
+         for MAVLink).
          Sign conventions (FLU, ROS euler): +pitch = nose down = +x accel,
          +roll = right side down = -y accel.
 
@@ -112,17 +118,15 @@ REAL WORLD (~engage_on_target: true, see startup/real_world):
     one-shot so the next target point can engage again. `ibvs/stop`
     disables servoing as usual.
 
-RC MASTER GATE (~rc_gate_enabled: true, real world):
-    A hardware switch on the transmitter is the master enable, read
-    straight from mavros/rc/in (channel ~rc_gate_channel, 0-based; ON when
-    above ~rc_gate_threshold, optionally ~rc_gate_invert). While the switch
-    is OFF the controller publishes NOTHING to the FCU -- it is completely
-    inert, so no setpoints reach ArduPilot until the pilot flips the switch.
-    Flipping it ON is the engage trigger (equivalent to ibvs/start): it
-    primes engagement, then a fresh target point switches the FCU to
-    GUIDED_NOGPS and servoing begins. Flipping it OFF mid-flight stops all
-    setpoints and disengages -- take manual control with the RC mode switch.
-    Fails safe: absent or stale RC (older than ~rc_gate_timeout) reads OFF.
+ENGAGEMENT:
+    Nothing is primed at node startup: servoing follows ~auto_start and the
+    mid-flight mode seizure follows ~engage_on_target / ~engage_needs_start.
+    With ~engage_needs_start false the first fresh target point while armed
+    seizes GUIDED_NOGPS; with it true `ibvs/start` must be called first and
+    the NEXT point is what engages. Once engaged the FCU mode is the
+    interlock (ArduPilot obeys these setpoints only in GUIDED_NOGPS), so the
+    safety pilot takes back control with the RC mode switch. `ibvs/stop`
+    disables servoing again.
 
 Thrust ("climb rate") per state:
     WAIT_ARM  hover_thrust (neutral; ignored anyway while disarmed)
@@ -138,9 +142,10 @@ import math
 
 import rospy
 import tf.transformations as tft
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, Vector3
 from nav_msgs.msg import Odometry
-from mavros_msgs.msg import AttitudeTarget, RCIn, State
+from sensor_msgs.msg import Imu
+from mavros_msgs.msg import AttitudeTarget, State
 from mavros_msgs.srv import CommandBool, SetMode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
@@ -320,22 +325,6 @@ class IbvsController:
         self.engage_needs_start = rospy.get_param('~engage_needs_start', False)
         self.engage_armed = self.engage_on_target and not self.engage_needs_start
 
-        # RC gate: a hardware switch on the transmitter is the master enable.
-        # While OFF the controller publishes NOTHING to the FCU (fully inert);
-        # flipping it ON is the "start" trigger (primes engagement, then a
-        # fresh target point engages). Read straight from mavros/rc/in so it
-        # does not depend on rc_to_joy. Fails safe: stale/absent RC = OFF.
-        # rc_gate_channel is the 0-based index into RCIn.channels (channel N
-        # on the transmitter is index N-1). Disabled by default so the sim /
-        # keyboard flow (ibvs/start) is unchanged.
-        self.rc_gate_enabled = rospy.get_param('~rc_gate_enabled', False)
-        self.rc_gate_channel = int(rospy.get_param('~rc_gate_channel', 6))
-        self.rc_gate_threshold = float(rospy.get_param('~rc_gate_threshold', 1500.0))
-        self.rc_gate_invert = rospy.get_param('~rc_gate_invert', False)
-        self.rc_gate_timeout = float(rospy.get_param('~rc_gate_timeout', 0.5))
-        self.last_rc = None
-        self.last_rc_time = None
-        self._rc_gate_prev = False
 
         self.state = WAIT_ARM
         self.state_entered_at = rospy.Time.now()
@@ -350,6 +339,13 @@ class IbvsController:
         self.t_y = None
         self.last_tag_time = None
         self.last_odom = None
+        # Attitude fallback. odom needs an EKF POSITION solution, which this
+        # setup has no source for (no GPS, no OptiTrack, no flow) -- in the
+        # real world mavros/local_position/odom simply never publishes, and
+        # the whole cascade used to collapse to zero rates because of it.
+        # mavros/imu/data carries the FCU's AHRS attitude in the same ENU/FLU
+        # convention and is available as soon as mavros connects.
+        self.last_imu = None
         # (x, y) in the local frame that HOVER/TAG_LOST hold on to
         self.hold_position = None
 
@@ -361,10 +357,10 @@ class IbvsController:
         self.state_pub.publish(String(data=self.state))
 
         rospy.Subscriber('mavros/state', State, self.mavros_state_callback, queue_size=1)
-        rospy.Subscriber('mavros/rc/in', RCIn, self.rc_callback, queue_size=1)
         rospy.Subscriber('ibvs/target_point', PointStamped, self.target_callback, queue_size=1)
         rospy.Subscriber('mavros/local_position/odom', Odometry,
                          self.odom_callback, queue_size=1)
+        rospy.Subscriber('mavros/imu/data', Imu, self.imu_callback, queue_size=1)
 
         self.set_mode_srv = rospy.ServiceProxy('mavros/set_mode', SetMode)
         self.arming_srv = rospy.ServiceProxy('mavros/cmd/arming', CommandBool)
@@ -431,27 +427,6 @@ class IbvsController:
         self.armed = msg.armed
         self.mode = msg.mode
 
-    def rc_callback(self, msg):
-        self.last_rc = msg.channels
-        self.last_rc_time = rospy.Time.now()
-
-    def rc_gate_is_on(self):
-        """Master enable from the RC switch. True = IBVS may command the FCU.
-
-        Disabled (~rc_gate_enabled false) -> always True (sim/keyboard flow).
-        Enabled -> reads mavros/rc/in and fails SAFE: no fresh RC, too few
-        channels, or the switch below threshold all read as OFF.
-        """
-        if not self.rc_gate_enabled:
-            return True
-        if self.last_rc_time is None or \
-                (rospy.Time.now() - self.last_rc_time).to_sec() > self.rc_gate_timeout:
-            return False
-        if self.last_rc is None or len(self.last_rc) <= self.rc_gate_channel:
-            return False
-        on = self.last_rc[self.rc_gate_channel] > self.rc_gate_threshold
-        return (not on) if self.rc_gate_invert else on
-
     def target_callback(self, msg):
         """Vision-module point -> pseudo target position in body FLU.
 
@@ -498,6 +473,26 @@ class IbvsController:
 
     def odom_callback(self, msg):
         self.last_odom = msg
+
+    def imu_callback(self, msg):
+        self.last_imu = msg
+
+    def current_attitude(self):
+        """(roll, pitch, yaw) in body FLU, or None if no attitude source yet.
+
+        Odometry is preferred (it is the same estimate the velocity and
+        position terms come from), but it requires an EKF position solution.
+        The IMU's AHRS attitude uses the same ENU/FLU convention and needs
+        no position estimate, so it keeps the attitude loop alive when
+        flying without GPS/OptiTrack.
+        """
+        if self.last_odom is not None:
+            q = self.last_odom.pose.pose.orientation
+        elif self.last_imu is not None:
+            q = self.last_imu.orientation
+        else:
+            return None
+        return tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
 
     def latch_hold_position(self):
         if self.last_odom is not None:
@@ -676,12 +671,16 @@ class IbvsController:
         means "keep the current tilt", which would fly away. Level flight is
         desired_tilt = 0, not rate = 0.
         """
-        if self.last_odom is None:
+        att = self.current_attitude()
+        if att is None:
             return 0.0, 0.0
+        roll, pitch, yaw = att
 
-        vel = self.last_odom.twist.twist.linear
-        q = self.last_odom.pose.pose.orientation
-        roll, pitch, yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
+        # Damping term of the cascade. It needs a VELOCITY estimate, so
+        # without odometry it drops to zero and the tag loop runs P+I only
+        # (more oscillatory -- back kp_xy off if it hunts).
+        vel = (self.last_odom.twist.twist.linear
+               if self.last_odom is not None else Vector3())
 
         # Default (CLIMB/HOVER/TAG_LOST): hold the latched position. Level
         # attitude alone is NOT a hover -- attitude trim bias pushes the
@@ -690,7 +689,8 @@ class IbvsController:
         # signs as the tag law, with the latched point playing the tag.
         desired_pitch = 0.0
         desired_roll = 0.0
-        if self.hold_position is not None and self.state in HOLD_STATES:
+        if self.hold_position is not None and self.last_odom is not None \
+                and self.state in HOLD_STATES:
             pos = self.last_odom.pose.pose.position
             ex = self.hold_position[0] - pos.x
             ey = self.hold_position[1] - pos.y
@@ -734,28 +734,6 @@ class IbvsController:
         return roll_rate, pitch_rate
 
     def control_loop(self, _event):
-        # RC master gate: while the switch is OFF the controller is inert and
-        # sends NOTHING to the FCU. Flipping it ON is the engage trigger.
-        gate_on = self.rc_gate_is_on()
-        if not gate_on:
-            if self._rc_gate_prev:
-                rospy.loginfo("ibvs_controller: RC gate OFF -- IBVS disengaged, "
-                              "no setpoints sent")
-                self.servo_active = False
-                self.engage_armed = False
-                self._land_ready_since = None
-                self.transition(WAIT_ARM)
-            self._rc_gate_prev = False
-            return
-        if not self._rc_gate_prev:
-            # rising edge: switch flipped ON -- prime engagement (== ibvs/start)
-            rospy.loginfo("ibvs_controller: RC gate ON -- IBVS live, awaiting target")
-            self.servo_active = True
-            self.engage_armed = self.engage_on_target
-            self.landed = False
-            self._land_ready_since = None
-            self._rc_gate_prev = True
-
         self.update_state_machine()
         thrust = self.compute_thrust()
         roll_rate, pitch_rate = self.compute_body_rates()
@@ -770,7 +748,7 @@ class IbvsController:
         msg.body_rate.x = roll_rate
         msg.body_rate.y = pitch_rate
         msg.body_rate.z = 0.0
-        msg.thrust = thrust
+        msg.thrust = thrust #samo za probu
         self.setpoint_pub.publish(msg)
 
 

@@ -5,11 +5,10 @@
 # and this controller flies ArduPilot directly (mavros/setpoint_raw/attitude).
 # There is NO range sensor and NO OptiTrack -- the vertical axis is open-rate.
 #
-# The safety pilot flies MANUALLY (STABILIZE). Flipping the RC master switch
-# (rc_gate below) is the trigger: until then the controller sends NOTHING to
-# the FCU. Once ON, a fresh target point switches the FCU to GUIDED_NOGPS and
-# servoing begins. The pilot always takes back control with the RC mode
-# switch (or by flipping the master switch OFF).
+# The safety pilot flies MANUALLY (STABILIZE). The controller streams
+# setpoints continuously; ArduPilot only acts on them in GUIDED_NOGPS, which
+# the controller seizes itself on the first fresh target point. The pilot
+# takes back control with the RC mode switch.
 #
 # GUID_OPTIONS must be 0 on the FCU (set in the startup session): thrust is a
 # CLIMB RATE (0.0 max descent, 0.5 hover, 1.0 max climb), NOT raw thrust.
@@ -27,26 +26,14 @@ image_x_sign: 1.0
 image_y_sign: 1.0
 
 # ---------------------------------------------------------------------------
-# RC master gate -- hardware switch that enables IBVS. While OFF the
-# controller is inert (no FCU setpoints); flipping ON primes engagement.
-# Read straight from mavros/rc/in. rc_gate_channel is the 0-based index into
-# RCIn.channels (transmitter channel N -> index N-1). SET THIS to your spare
-# AUX switch and confirm rc/in shows it toggling ~1000<->2000 us.
-# ---------------------------------------------------------------------------
-rc_gate_enabled: true        # require the RC master switch ON before any
-                              # setpoints are sent to the FCU (safety gate)
-rc_gate_channel: 6            # 0-based -> transmitter channel 7 (CHANGE ME)
-rc_gate_threshold: 1500.0     # [us] above = ON
-rc_gate_invert: false         # true if the switch reads high when OFF
-rc_gate_timeout: 0.5          # [s] no fresh RC within this -> gate OFF (failsafe)
-
-# ---------------------------------------------------------------------------
-# Engagement (real world): a fresh target point engages once primed.
-# With the RC gate on, the switch IS the "start"; these stay true so the
-# controller seizes GUIDED_NOGPS itself and the ibvs/start service still works.
+# Engagement (real world): nothing is primed at startup. The controller
+# seizes GUIDED_NOGPS itself on a fresh target point; ibvs/start and
+# ibvs/stop work either way.
 # ---------------------------------------------------------------------------
 engage_on_target: true
-engage_needs_start: true
+engage_needs_start: false     # false = the FIRST fresh target point while
+                              # armed engages (no ibvs/start needed);
+                              # true = ibvs/start first, NEXT point engages
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 

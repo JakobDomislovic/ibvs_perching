@@ -12,8 +12,7 @@ pre_window: export UAV_NAMESPACE=<%= @settings["namespace"] %> && source ./shell
 # Lean on purpose (RAM): the old session.yml pulled in aruco_detector
 # (~120 MB cv2+numpy) and 6 rostopic-echo monitors (~37 MB each). This one
 # runs only what flies: roscore, mavros, udp_target_receiver, ibvs_controller,
-# and a single state monitor. The RC gate reads mavros/rc/in directly, so
-# rc_to_joy is not needed either.
+# and a single state monitor. rc_to_joy is not needed either.
 # ---------------------------------------------------------------------------
 windows:
   - stack:
@@ -41,9 +40,7 @@ windows:
           fx:=<%= @settings["fx"] %> fy:=<%= @settings["fy"] %>
         # single lightweight monitor: the IBVS state machine
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
-        # handy on-demand commands (loaded into history, not run):
-        - history -s "rostopic echo /$UAV_NAMESPACE/mavros/rc/in --noarr" ;
-          history -s "rostopic echo /$UAV_NAMESPACE/ibvs/target_point" ;
-          history -s "rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude" ;
-          history -s "rosservice call /$UAV_NAMESPACE/ibvs/stop" ;
-          history -s "rosservice call /$UAV_NAMESPACE/mavros/cmd/arming false"
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
+        

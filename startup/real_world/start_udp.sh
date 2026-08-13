@@ -19,11 +19,15 @@ MISSION_MODE=land                # land = down cam, descend+disarm | perch = up 
 UAV_NAMESPACE=red                # ROS namespace for mavros + ibvs
 
 BIND_PORT=5005                   # UDP port the PiOS detector sends to
-# PiOS camera intrinsics -- Arduino Nicla Vision (GC2145) @ QVGA 320x240:
-CX=160.0                         # image center x [px]
-CY=120.0                         # image center y [px]
-FX=251.0                         # focal length x [px]
-FY=251.0                         # focal length y [px]
+# PiOS camera intrinsics -- DSJ-3079-HE (USB UVC) @ 1280x720.
+# These MUST match the resolution the PiOS detector reports px/py in (if it
+# downscales before detection, use the DOWNSCALED size here, not the capture
+# size). cx/cy are exact resolution math; fx/fy are NOT calibrated -- see
+# ibvs_udp.launch. Verify by centering the tag and reading the incoming px/py.
+CX=640.0                         # image center x [px] = width/2
+CY=360.0                         # image center y [px] = height/2
+FX=251.0                         # focal length x [px] -- TODO: uncalibrated, carried
+FY=251.0                         # focal length y [px]    over from the Nicla camera
 # ---------------------------------------------------------------------------
 
 # work from this script's directory
