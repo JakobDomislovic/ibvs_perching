@@ -16,18 +16,17 @@ VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
                  (u - cx) / fx, positive RIGHT in the image
         point.y  normalized vertical offset from the image center,
                  (v - cy) / fy, positive DOWN in the image
-        point.z  distance to the target along the optical axis [m],
-                 or 0.0 if unknown
+        point.z  IGNORED -- there is no range sensor. The vertical axis is
+                 open-rate (descend for landing, climb for perching), not
+                 target-relative.
     Publishing on this topic at all means "target in sight": the state
     machine shows TAG_IN_SIGHT and ibvs/start will engage. The controller
     steers so the point goes to the image center (target_x/target_y offsets
-    are available). Vertical motion toward the target happens ONLY when
-    point.z carries a real distance; with z=0 the controller centers the
-    point while holding altitude.
+    are available).
 
-    The camera is assumed rigidly mounted looking straight down with image
-    RIGHT = body FORWARD (the kopterworx down_facing_camera mount): a point
-    seen at (+x, +y) in the image lies (forward, right) of the vehicle.
+    The camera mount is selected by mission_mode (land = down, perch = up);
+    the image->body axis mapping is set by image_x_sign / image_y_sign so
+    the same interface serves either orientation.
 
 IMPORTANT -- how ArduPilot interprets the "thrust" field:
     In GUIDED / GUIDED_NOGPS mode ArduPilot treats AttitudeTarget.thrust
@@ -40,11 +39,13 @@ IMPORTANT -- how ArduPilot interprets the "thrust" field:
     only takes off when we command thrust ABOVE 0.5 (climb_thrust).
 
 Control split:
-  - Z:   climb-rate control through the thrust field. During CLIMB
-         (takeoff) a fixed climb_thrust is sent. During ALIGN/ALIGNED a
-         PID on the tag's relative height regulates toward target_z:
-         thrust = hover + PID_z(tag_z - target_z), clamped to
-         [thrust_min, thrust_max].
+  - Z:   OPEN-RATE climb control through the thrust field (no range sensor).
+         During CLIMB (takeoff) a fixed climb_thrust is sent. During
+         ALIGN/ALIGNED, while laterally centered, a fixed rate is sent:
+         land_descend_thrust (< 0.5, descend) in land mode or
+         perch_climb_thrust (> 0.5, climb) in perch mode; off-center or in
+         any hold state it is hover_thrust. Landing then disarms on odometry
+         altitude (land_disarm_height); perching is finished by the pilot.
   - X-Y: closed-loop IBVS as a CASCADE. A raw body-rate command
          proportional to position error is unstable (the rate integrates
          into an unbounded tilt -- flight tested, it flips the vehicle),
@@ -111,12 +112,25 @@ REAL WORLD (~engage_on_target: true, see startup/real_world):
     one-shot so the next target point can engage again. `ibvs/stop`
     disables servoing as usual.
 
+RC MASTER GATE (~rc_gate_enabled: true, real world):
+    A hardware switch on the transmitter is the master enable, read
+    straight from mavros/rc/in (channel ~rc_gate_channel, 0-based; ON when
+    above ~rc_gate_threshold, optionally ~rc_gate_invert). While the switch
+    is OFF the controller publishes NOTHING to the FCU -- it is completely
+    inert, so no setpoints reach ArduPilot until the pilot flips the switch.
+    Flipping it ON is the engage trigger (equivalent to ibvs/start): it
+    primes engagement, then a fresh target point switches the FCU to
+    GUIDED_NOGPS and servoing begins. Flipping it OFF mid-flight stops all
+    setpoints and disengages -- take manual control with the RC mode switch.
+    Fails safe: absent or stale RC (older than ~rc_gate_timeout) reads OFF.
+
 Thrust ("climb rate") per state:
     WAIT_ARM  hover_thrust (neutral; ignored anyway while disarmed)
     CLIMB     climb_thrust (constant climb -> this IS the takeoff)
     HOVER     hover_thrust (hold altitude, wait for ibvs/start)
-    ALIGN     PID on tag z error, clamped
-    ALIGNED   PID on tag z error, clamped
+    ALIGN     centered: land_descend_thrust (land) / perch_climb_thrust
+              (perch); off-center: hover_thrust
+    ALIGNED   same as ALIGN (land then disarms once low; perch keeps climbing)
     TAG_LOST  hover_thrust (hold altitude, wait for re-detection)
 """
 
@@ -126,7 +140,7 @@ import rospy
 import tf.transformations as tft
 from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
-from mavros_msgs.msg import AttitudeTarget, State
+from mavros_msgs.msg import AttitudeTarget, RCIn, State
 from mavros_msgs.srv import CommandBool, SetMode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
@@ -142,6 +156,17 @@ TAG_LOST = 'TAG_LOST'
 
 # states that hold the latched position (everything flying except servoing)
 HOLD_STATES = (CLIMB, HOVER, TAG_IN_SIGHT, TAG_LOST)
+
+# Mission mode -- what the vertical (thrust/climb-rate) axis does once the
+# controller is centered on the target. Both modes center the target in the
+# image the same way (X-Y IBVS cascade); they differ only in the vertical:
+#   MODE_LAND  down-facing camera, target BELOW: descend onto it, then disarm
+#              (real touchdown). Uses the range hint (point.z) as height.
+#   MODE_PERCH up-facing camera, branch ABOVE: climb toward it while centered.
+#              Range is ignored; there is no automatic terminal -- the safety
+#              pilot takes over manually once the vehicle is at the branch.
+MODE_LAND = 'land'
+MODE_PERCH = 'perch'
 
 
 def clamp(value, low, high):
@@ -186,19 +211,56 @@ class IbvsController:
         self.control_rate = rospy.get_param('~control_rate', 20.0)
         self.dt = 1.0 / self.control_rate
 
+        # Mission mode: 'land' (down cam, descend + disarm) or 'perch'
+        # (up cam, climb toward the branch). See MODE_* above.
+        self.mission_mode = rospy.get_param('~mission_mode', MODE_LAND)
+        if self.mission_mode not in (MODE_LAND, MODE_PERCH):
+            rospy.logwarn("ibvs_controller: unknown mission_mode '%s', "
+                          "falling back to '%s'", self.mission_mode, MODE_LAND)
+            self.mission_mode = MODE_LAND
+
+        # Image->body sign per axis. The vision interface is fixed (point.x
+        # positive RIGHT, point.y positive DOWN) but the physical mount is
+        # not: a down camera (landing) and an up camera (perching) map the
+        # same image error to OPPOSITE body directions. These two knobs
+        # absorb both the camera flip and the detector's pixel-sign
+        # convention -- set them on the bench so a target off to one side
+        # produces a correction TOWARD it (negative feedback). Defaults suit
+        # the down-facing landing camera.
+        self.image_x_sign = rospy.get_param('~image_x_sign', 1.0)
+        self.image_y_sign = rospy.get_param('~image_y_sign', 1.0)
+
+        # PERCH: constant climb-rate command sent while centered on the
+        # branch above (> hover_thrust = climb). Held to thrust_max.
+        self.perch_climb_thrust = rospy.get_param('~perch_climb_thrust', 0.55)
+
+        # LAND: constant slow descent command sent while centered
+        # (< hover_thrust = descend). Held to thrust_min. There is no range
+        # sensor -- the descent is open-rate and the terminal disarm uses
+        # odometry altitude (see maybe_land_disarm).
+        self.land_descend_thrust = rospy.get_param('~land_descend_thrust', 0.45)
+
+        # LAND: cut thrust and disarm once centered and this low, using
+        # odometry altitude. land_disarm_dwell debounces spurious readings.
+        self.disarm_on_land = rospy.get_param('~disarm_on_land', True)
+        self.land_disarm_height = rospy.get_param('~land_disarm_height', 0.15)
+        self.land_disarm_dwell = rospy.get_param('~land_disarm_dwell', 0.3)
+        self.landed = False
+        self._land_ready_since = None
+
         # Z axis ("climb rate" through the thrust field)
         self.hover_thrust = rospy.get_param('~hover_thrust', 0.5)
         self.climb_thrust = rospy.get_param('~climb_thrust', 0.6)
         self.thrust_min = rospy.get_param('~thrust_min', 0.35)
         self.thrust_max = rospy.get_param('~thrust_max', 0.7)
-        self.target_z = rospy.get_param('~target_z', -0.5)
         self.takeoff_height = rospy.get_param('~takeoff_height', 2.0)
-        # assumed distance to the target when the vision module gives no
-        # depth (point.z = 0); only scales the X-Y gains, never used for Z
+        # fixed scale from the normalized image offset to the pseudo body
+        # position error -- there is no depth sensor, so this constant just
+        # sets the X-Y loop gain together with pid_xy (never used for Z)
         self.depth_guess = rospy.get_param('~depth_guess', 2.0)
-        # descend only while laterally centered on the tag: descending
-        # off-center shrinks the camera FOV faster than the X-Y loop
-        # converges and the tag falls out of frame (flight-tested)
+        # descend/climb only while laterally centered on the tag: moving
+        # vertically off-center shrinks the camera FOV faster than the X-Y
+        # loop converges and the tag falls out of frame (flight-tested)
         self.descend_xy_gate = rospy.get_param('~descend_xy_gate', 0.25)
 
         # X-Y axis (IBVS cascade: PID on tag error -> desired tilt -> body rate)
@@ -215,21 +277,16 @@ class IbvsController:
         self.kp_hover = rospy.get_param('~kp_hover', 0.15)
         self.kv_hover = rospy.get_param('~kv_hover', 0.25)
 
-        # PID gains (I and D default to 0 -- pure P until tuned otherwise)
+        # PID gains (I and D default to 0 -- pure P until tuned otherwise).
+        # X-Y only: the vertical axis is open-rate (no range sensor), so there
+        # is no Z PID.
         kp_xy = rospy.get_param('~pid_xy/kp', 0.15)
         ki_xy = rospy.get_param('~pid_xy/ki', 0.0)
         kd_xy = rospy.get_param('~pid_xy/kd', 0.0)
         i_max_xy = rospy.get_param('~pid_xy/i_max', 0.05)
-        kp_z = rospy.get_param('~pid_z/kp', 0.2)
-        ki_z = rospy.get_param('~pid_z/ki', 0.0)
-        kd_z = rospy.get_param('~pid_z/kd', 0.0)
-        i_max_z = rospy.get_param('~pid_z/i_max', 0.1)
 
         self.pid_x = Pid(kp_xy, ki_xy, kd_xy, -self.max_tilt, self.max_tilt, i_max_xy)
         self.pid_y = Pid(kp_xy, ki_xy, kd_xy, -self.max_tilt, self.max_tilt, i_max_xy)
-        self.pid_z = Pid(kp_z, ki_z, kd_z,
-                         self.thrust_min - self.hover_thrust,
-                         self.thrust_max - self.hover_thrust, i_max_z)
 
         # State machine timing / thresholds
         self.climb_settle_time = rospy.get_param('~climb_settle_time', 3.0)
@@ -263,6 +320,23 @@ class IbvsController:
         self.engage_needs_start = rospy.get_param('~engage_needs_start', False)
         self.engage_armed = self.engage_on_target and not self.engage_needs_start
 
+        # RC gate: a hardware switch on the transmitter is the master enable.
+        # While OFF the controller publishes NOTHING to the FCU (fully inert);
+        # flipping it ON is the "start" trigger (primes engagement, then a
+        # fresh target point engages). Read straight from mavros/rc/in so it
+        # does not depend on rc_to_joy. Fails safe: stale/absent RC = OFF.
+        # rc_gate_channel is the 0-based index into RCIn.channels (channel N
+        # on the transmitter is index N-1). Disabled by default so the sim /
+        # keyboard flow (ibvs/start) is unchanged.
+        self.rc_gate_enabled = rospy.get_param('~rc_gate_enabled', False)
+        self.rc_gate_channel = int(rospy.get_param('~rc_gate_channel', 6))
+        self.rc_gate_threshold = float(rospy.get_param('~rc_gate_threshold', 1500.0))
+        self.rc_gate_invert = rospy.get_param('~rc_gate_invert', False)
+        self.rc_gate_timeout = float(rospy.get_param('~rc_gate_timeout', 0.5))
+        self.last_rc = None
+        self.last_rc_time = None
+        self._rc_gate_prev = False
+
         self.state = WAIT_ARM
         self.state_entered_at = rospy.Time.now()
         self.aligned_since = None
@@ -270,11 +344,10 @@ class IbvsController:
         self.armed = False
         self.mode = ''
         # target reconstructed from the vision module's image point, in the
-        # body FLU frame: t_x forward, t_y left; t_z is None without a depth
-        # hint (then only lateral centering runs, no climb/descent)
+        # body FLU frame: t_x forward, t_y left. There is no depth axis --
+        # the vertical (climb/descend) is open-rate, not target-relative.
         self.t_x = None
         self.t_y = None
-        self.t_z = None
         self.last_tag_time = None
         self.last_odom = None
         # (x, y) in the local frame that HOVER/TAG_LOST hold on to
@@ -288,6 +361,7 @@ class IbvsController:
         self.state_pub.publish(String(data=self.state))
 
         rospy.Subscriber('mavros/state', State, self.mavros_state_callback, queue_size=1)
+        rospy.Subscriber('mavros/rc/in', RCIn, self.rc_callback, queue_size=1)
         rospy.Subscriber('ibvs/target_point', PointStamped, self.target_callback, queue_size=1)
         rospy.Subscriber('mavros/local_position/odom', Odometry,
                          self.odom_callback, queue_size=1)
@@ -310,6 +384,8 @@ class IbvsController:
 
         # Allow climbing as soon as armed+mode are confirmed by mavros/state.
         self.takeoff_requested = True
+        self.landed = False
+        self._land_ready_since = None
         try:
             if self.mode != State.MODE_APM_COPTER_GUIDED_NOGPS:
                 mode_res = self.set_mode_srv(
@@ -338,6 +414,8 @@ class IbvsController:
 
     def handle_start(self, _req):
         self.servo_active = True
+        self.landed = False
+        self._land_ready_since = None
         # re-arm the one-shot mid-flight engagement (real world): the next
         # fresh target point may switch the FCU to GUIDED_NOGPS again
         self.engage_armed = self.engage_on_target
@@ -353,18 +431,39 @@ class IbvsController:
         self.armed = msg.armed
         self.mode = msg.mode
 
+    def rc_callback(self, msg):
+        self.last_rc = msg.channels
+        self.last_rc_time = rospy.Time.now()
+
+    def rc_gate_is_on(self):
+        """Master enable from the RC switch. True = IBVS may command the FCU.
+
+        Disabled (~rc_gate_enabled false) -> always True (sim/keyboard flow).
+        Enabled -> reads mavros/rc/in and fails SAFE: no fresh RC, too few
+        channels, or the switch below threshold all read as OFF.
+        """
+        if not self.rc_gate_enabled:
+            return True
+        if self.last_rc_time is None or \
+                (rospy.Time.now() - self.last_rc_time).to_sec() > self.rc_gate_timeout:
+            return False
+        if self.last_rc is None or len(self.last_rc) <= self.rc_gate_channel:
+            return False
+        on = self.last_rc[self.rc_gate_channel] > self.rc_gate_threshold
+        return (not on) if self.rc_gate_invert else on
+
     def target_callback(self, msg):
         """Vision-module point -> pseudo target position in body FLU.
 
-        Down camera with image right = body forward:
-            direction_body = (point.x, -point.y, -1) * depth
-        Without a depth hint the lateral error is scaled by depth_guess --
-        the loop still centers the point, gains just aren't depth-adapted.
+        Only the normalized image offset (point.x/point.y) is used; point.z
+        is ignored (there is no range sensor). The offset is scaled by the
+        fixed depth_guess into a body X-Y error for the centering loop; the
+        image_*_sign knobs map the image axes to the body frame for the
+        down (land) vs up (perch) camera.
         """
-        depth = msg.point.z if msg.point.z > 0.0 else self.depth_guess
-        self.t_x = depth * msg.point.x
-        self.t_y = -depth * msg.point.y
-        self.t_z = -msg.point.z if msg.point.z > 0.0 else None
+        depth = self.depth_guess
+        self.t_x = depth * self.image_x_sign * msg.point.x
+        self.t_y = -depth * self.image_y_sign * msg.point.y
         self.last_tag_time = rospy.Time.now()
 
         # real world: this point is the "go autonomous" signal
@@ -415,7 +514,6 @@ class IbvsController:
             if new_state == ALIGN and self.state not in (ALIGN, ALIGNED):
                 self.pid_x.reset()
                 self.pid_y.reset()
-                self.pid_z.reset()
             # Latch the spot the hold states keep: the takeoff point when
             # CLIMB starts, or wherever the vehicle is when servoing stops /
             # the tag is lost. HOVER <-> TAG_IN_SIGHT keep the same latch
@@ -488,34 +586,87 @@ class IbvsController:
 
         return ready_to_fly
 
+    def lateral_error(self):
+        """Distance of the tracked point from the desired image center [m],
+        in the body frame, or None without a detection."""
+        if self.t_x is None:
+            return None
+        return ((self.target_x - self.t_x) ** 2 +
+                (self.target_y - self.t_y) ** 2) ** 0.5
+
     def compute_thrust(self):
         """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
         if self.state == CLIMB:
             return self.climb_thrust
 
-        # vertical motion toward the target requires a depth hint from the
-        # vision module (point.z > 0); a bare image point only centers X-Y
-        if self.state in (ALIGN, ALIGNED) and self.t_z is not None:
-            # t_z is the target's height above the vehicle (body FLU);
-            # negative for a target below. Regulate toward the standoff.
-            z_err = self.t_z - self.target_z
-            z_err_dot = 0.0
-            if self.last_odom is not None:
-                # stationary target: d(t_z)/dt = -climb velocity
-                z_err_dot = -self.last_odom.twist.twist.linear.z
-            delta = self.pid_z.update(z_err, z_err_dot, self.dt)
+        # PERCH: the branch is ABOVE (up camera). Climb toward it, but only
+        # while laterally centered -- climbing off-center drifts the branch
+        # out of the shrinking FOV, same funnel logic as the landing descent.
+        # Range is ignored; the safety pilot commits the final grab manually.
+        if self.mission_mode == MODE_PERCH:
+            if self.state in (ALIGN, ALIGNED):
+                lateral_error = self.lateral_error()
+                if lateral_error is not None and lateral_error <= self.descend_xy_gate:
+                    return min(self.perch_climb_thrust, self.thrust_max)
+            return self.hover_thrust
 
-            # landing funnel: never descend while laterally off-center,
-            # otherwise the target exits the shrinking camera FOV
-            lateral_error = ((self.target_x - self.t_x) ** 2 +
-                             (self.target_y - self.t_y) ** 2) ** 0.5
-            if delta < 0.0 and lateral_error > self.descend_xy_gate:
-                delta = 0.0
-
-            return self.hover_thrust + delta
+        # LAND: constant slow descent toward the target below, then disarm.
+        # Descend ONLY while laterally centered -- descending off-center drops
+        # the target out of the shrinking FOV (flight-tested funnel).
+        if self.state in (ALIGN, ALIGNED):
+            lateral_error = self.lateral_error()
+            centered = (lateral_error is not None and
+                        lateral_error <= self.descend_xy_gate)
+            if centered:
+                return max(self.land_descend_thrust, self.thrust_min)
+            return self.hover_thrust
 
         # WAIT_ARM (ignored while disarmed) and TAG_LOST: hold altitude.
         return self.hover_thrust
+
+    def maybe_land_disarm(self):
+        """LAND terminal: once centered and low enough, disarm (touchdown).
+
+        Height comes from odometry altitude (there is no range sensor). The
+        condition must hold for land_disarm_dwell seconds so a single spurious
+        low reading cannot disarm mid-air. The disarm is one-shot
+        (self.landed); a fresh ibvs/takeoff or ibvs/start re-arms it.
+        """
+        if self.landed or not self.disarm_on_land:
+            return
+        if self.state not in (ALIGN, ALIGNED):
+            self._land_ready_since = None
+            return
+
+        lateral_error = self.lateral_error()
+        if lateral_error is None or lateral_error > self.descend_xy_gate:
+            self._land_ready_since = None
+            return
+
+        if self.last_odom is None:
+            self._land_ready_since = None
+            return
+        height = self.last_odom.pose.pose.position.z
+
+        if height > self.land_disarm_height:
+            self._land_ready_since = None
+            return
+
+        now = rospy.Time.now()
+        if self._land_ready_since is None:
+            self._land_ready_since = now
+            return
+        if (now - self._land_ready_since).to_sec() < self.land_disarm_dwell:
+            return
+
+        self.landed = True
+        self.servo_active = False
+        rospy.loginfo("ibvs_controller: LANDED (height %.2f m <= %.2f) -- disarming",
+                      height, self.land_disarm_height)
+        try:
+            self.arming_srv(False)
+        except rospy.ServiceException as exc:
+            rospy.logerr("ibvs_controller: disarm failed: %s", exc)
 
     def compute_body_rates(self):
         """Cascade: tag position error -> desired tilt -> body rate.
@@ -583,10 +734,34 @@ class IbvsController:
         return roll_rate, pitch_rate
 
     def control_loop(self, _event):
+        # RC master gate: while the switch is OFF the controller is inert and
+        # sends NOTHING to the FCU. Flipping it ON is the engage trigger.
+        gate_on = self.rc_gate_is_on()
+        if not gate_on:
+            if self._rc_gate_prev:
+                rospy.loginfo("ibvs_controller: RC gate OFF -- IBVS disengaged, "
+                              "no setpoints sent")
+                self.servo_active = False
+                self.engage_armed = False
+                self._land_ready_since = None
+                self.transition(WAIT_ARM)
+            self._rc_gate_prev = False
+            return
+        if not self._rc_gate_prev:
+            # rising edge: switch flipped ON -- prime engagement (== ibvs/start)
+            rospy.loginfo("ibvs_controller: RC gate ON -- IBVS live, awaiting target")
+            self.servo_active = True
+            self.engage_armed = self.engage_on_target
+            self.landed = False
+            self._land_ready_since = None
+            self._rc_gate_prev = True
+
         self.update_state_machine()
         thrust = self.compute_thrust()
         roll_rate, pitch_rate = self.compute_body_rates()
         self.publish_setpoint(roll_rate, pitch_rate, thrust)
+        if self.mission_mode == MODE_LAND:
+            self.maybe_land_disarm()
 
     def publish_setpoint(self, roll_rate, pitch_rate, thrust):
         msg = AttitudeTarget()

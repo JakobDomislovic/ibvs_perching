@@ -1,25 +1,59 @@
 # ibvs_controller.py parameters -- REAL WORLD (startup/real_world).
 #
-# Same controller as in simulation (config/ibvs_params.yaml). The vehicle
-# is flown MANUALLY (STABILIZE) by the safety pilot; call ibvs/start (the
-# IBVS joystick button -- 'i' on the sim keyboard) and the next point
-# published on ibvs/target_point makes the controller switch the FCU to
-# GUIDED_NOGPS itself and start servoing -- no takeoff service, no
-# position_hold handshake. The safety pilot always takes back control
-# with the RC mode switch; after such a takeover the controller never
-# re-takes the mode on its own (flip the RC switch back to GUIDED_NOGPS
-# to re-engage, or press the button again for the next point to engage).
+# Off-board detection: the PiOS companion detects the target and streams its
+# pixel position over UDP; udp_target_receiver republishes ibvs/target_point
+# and this controller flies ArduPilot directly (mavros/setpoint_raw/attitude).
+# There is NO range sensor and NO OptiTrack -- the vertical axis is open-rate.
 #
-# GUID_OPTIONS must be 0 on the FCU (set in session.yml): thrust is a
+# The safety pilot flies MANUALLY (STABILIZE). Flipping the RC master switch
+# (rc_gate below) is the trigger: until then the controller sends NOTHING to
+# the FCU. Once ON, a fresh target point switches the FCU to GUIDED_NOGPS and
+# servoing begins. The pilot always takes back control with the RC mode
+# switch (or by flipping the master switch OFF).
+#
+# GUID_OPTIONS must be 0 on the FCU (set in the startup session): thrust is a
 # CLIMB RATE (0.0 max descent, 0.5 hover, 1.0 max climb), NOT raw thrust.
 
-engage_on_target: true        # a fresh ibvs/target_point engages the controller
-engage_needs_start: true      # ...but only after ibvs/start (joystick button)
+# ---------------------------------------------------------------------------
+# Mission mode: 'land' (down cam, descend + disarm) or 'perch' (up cam, climb
+# toward the branch). Override per run from the launch (mission_mode:=perch).
+# ---------------------------------------------------------------------------
+mission_mode: land
+
+# Image->body sign per axis (absorb the camera flip + detector pixel-sign
+# convention). Defaults suit the down-facing landing camera; the up-facing
+# perch camera typically needs one or both at -1.0 -- VERIFY ON THE BENCH.
+image_x_sign: 1.0
+image_y_sign: 1.0
+
+# ---------------------------------------------------------------------------
+# RC master gate -- hardware switch that enables IBVS. While OFF the
+# controller is inert (no FCU setpoints); flipping ON primes engagement.
+# Read straight from mavros/rc/in. rc_gate_channel is the 0-based index into
+# RCIn.channels (transmitter channel N -> index N-1). SET THIS to your spare
+# AUX switch and confirm rc/in shows it toggling ~1000<->2000 us.
+# ---------------------------------------------------------------------------
+rc_gate_enabled: false        # DISABLED for now (bench tests, no flying) --
+                              # set true to require the RC switch before any
+                              # setpoints are sent to the FCU
+rc_gate_channel: 6            # 0-based -> transmitter channel 7 (CHANGE ME)
+rc_gate_threshold: 1500.0     # [us] above = ON
+rc_gate_invert: false         # true if the switch reads high when OFF
+rc_gate_timeout: 0.5          # [s] no fresh RC within this -> gate OFF (failsafe)
+
+# ---------------------------------------------------------------------------
+# Engagement (real world): a fresh target point engages once primed.
+# With the RC gate on, the switch IS the "start"; these stay true so the
+# controller seizes GUIDED_NOGPS itself and the ibvs/start service still works.
+# ---------------------------------------------------------------------------
+engage_on_target: true
+engage_needs_start: true
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
 # ---------------------------------------------------------------------------
-# Z axis -- climb rate through the AttitudeTarget "thrust" field.
+# Vertical axis -- open-rate climb control through the thrust field (no range
+# sensor). 0.0 max descent, 0.5 hover, 1.0 max climb.
 # ---------------------------------------------------------------------------
 hover_thrust: 0.5             # zero-climb-rate ("hover") command
 climb_thrust: 0.52            # only used by the ibvs/takeoff CLIMB path
@@ -27,21 +61,26 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 
-# Desired target height ABOVE the vehicle (negative = target below).
-# -0.5 => hover 0.5 m above the tag. Vertical motion only happens when the
-# vision module provides a depth (point.z > 0).
-target_z: -0.5
-depth_guess: 2.0              # [m] assumed target distance when the vision
-                              # module sends no depth (point.z = 0); only
-                              # scales X-Y gains, never causes Z motion
+perch_climb_thrust: 0.55      # PERCH: constant climb while centered on the branch
+land_descend_thrust: 0.45     # LAND: constant slow descent while centered
+
+# LAND terminal: disarm once centered (within descend_xy_gate) and below
+# land_disarm_height (odometry altitude), held for land_disarm_dwell seconds.
+disarm_on_land: true
+land_disarm_height: 0.15      # [m] odometry altitude below which disarm triggers
+land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
+
+depth_guess: 2.0              # [m] fixed scale from the normalized image offset
+                              # to the pseudo body error; sets the X-Y loop gain
+                              # together with pid_xy, never causes Z motion
 
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the tag position error:
-#   desired_tilt = PID_xy(tag error), body_rate = kp_att * (tilt error)
+# X-Y axis -- closed-loop IBVS cascade on the target image error:
+#   desired_tilt = PID_xy(error), body_rate = kp_att * (tilt error)
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired relative tag x (forward) offset [m]
-target_y: 0.0                 # desired relative tag y (left) offset [m]
-descend_xy_gate: 0.25         # [m] descend only while centered within this radius
+target_x: 0.0                 # desired relative target x (forward) offset [m]
+target_y: 0.0                 # desired relative target y (left) offset [m]
+descend_xy_gate: 0.25         # [m] descend/climb only while centered within this
 
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
 kp_att: 1.5                   # body rate per rad of attitude error [1/s]
@@ -50,19 +89,14 @@ kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]
 kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
 
 # ---------------------------------------------------------------------------
-# PID gains (flight-tested starting point, same as simulation)
+# PID gains (flight-tested starting point, same as simulation). X-Y only --
+# the vertical axis is open-rate, there is no Z PID.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.10                    # desired tilt per meter of tag error [rad/m]
+  kp: 0.10                    # desired tilt per meter of target error [rad/m]
   ki: 0.0                     # [rad per m*s]
   kd: 0.15                    # [rad per m/s] velocity damping -- keep > 0
   i_max: 0.05                 # [rad] max integral contribution
-
-pid_z:
-  kp: 0.1                     # climb-rate delta per meter of tag z error [1/m]
-  ki: 0.0                     # [1 per m*s]
-  kd: 0.0                     # [1 per m/s]
-  i_max: 0.1                  # max integral contribution
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds

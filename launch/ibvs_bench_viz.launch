@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- BENCH visualization harness: run the REAL udp_target_receiver + REAL
+       ibvs_controller against live PiOS UDP input, with a stub standing in
+       for the FCU, so you can SEE the commanded body-rate direction (left /
+       right / fwd / back / up / down) without flying.
+
+       !!! BENCH ONLY. bench_fcu_stub fakes armed+GUIDED_NOGPS and a level
+       odom. Do NOT run this alongside real mavros on a flyable vehicle. For
+       real flight use ibvs_udp.launch + mavros_apm.launch instead. !!!
+
+       The visualizer (ibvs_viz.py) is NOT started here; run it in its own
+       terminal so it owns a clean TTY:
+         rosrun ibvs_perching ibvs_viz.py _mission_mode:=land \
+                _cx:=640 _cy:=360 _fx:=251 _fy:=251 _img_w:=1280 _img_h:=720
+       (or just use startup/real_world/bench_viz.sh which does all of this).
+  -->
+
+  <arg name="namespace" default="$(env UAV_NAMESPACE)"/>
+  <arg name="config" default="$(find ibvs_perching)/config/ibvs_params.yaml"/>
+  <arg name="mission_mode" default="land"/>
+
+  <arg name="bind_ip"   default="0.0.0.0"/>
+  <arg name="bind_port" default="5005"/>
+
+  <!-- PiOS camera intrinsics (DSJ-3079-HE @ 1280x720). fx/fy uncalibrated;
+       fine for direction confirmation, replace before trusting gain scaling. -->
+  <arg name="cx" default="640.0"/>
+  <arg name="cy" default="360.0"/>
+  <arg name="fx" default="251.0"/>
+  <arg name="fy" default="251.0"/>
+
+  <!-- fake bench altitude reported by the stub odom -->
+  <arg name="bench_altitude" default="1.5"/>
+
+  <group ns="$(arg namespace)">
+
+    <node pkg="ibvs_perching" type="udp_target_receiver.py"
+          name="udp_target_receiver" output="screen">
+      <param name="bind_ip"   value="$(arg bind_ip)"/>
+      <param name="bind_port" value="$(arg bind_port)"/>
+      <param name="cx"        value="$(arg cx)"/>
+      <param name="cy"        value="$(arg cy)"/>
+      <param name="fx"        value="$(arg fx)"/>
+      <param name="fy"        value="$(arg fy)"/>
+    </node>
+
+    <!-- real controller. engage_on_target so a target point auto-engages,
+         rc gate off, so with the bench stub's armed+GUIDED it walks straight
+         to ALIGN and publishes body-rate commands. -->
+    <node pkg="ibvs_perching" type="ibvs_controller.py"
+          name="ibvs_controller" output="log">
+      <rosparam file="$(arg config)" command="load"/>
+      <param name="mission_mode"    value="$(arg mission_mode)"/>
+      <param name="engage_on_target" value="true"/>
+      <param name="rc_gate_enabled"  value="false"/>
+    </node>
+
+    <!-- BENCH ONLY FCU stub: fake armed+GUIDED + level odom + dummy services -->
+    <node pkg="ibvs_perching" type="bench_fcu_stub.py"
+          name="bench_fcu_stub" output="screen">
+      <param name="altitude" value="$(arg bench_altitude)"/>
+    </node>
+
+  </group>
+
+</launch>

@@ -1,0 +1,49 @@
+name: ibvs_perching_udp
+root: ./
+startup_window: ibvs
+# All settings come from start_udp.sh (fcu_url, mission_mode, namespace,
+# bind_port, cx/cy/fx/fy) -- DO NOT edit them here, edit start_udp.sh.
+pre_window: export UAV_NAMESPACE=<%= @settings["namespace"] %> && source ./shell_helpers.sh
+# ---------------------------------------------------------------------------
+# CONSOLIDATED real-world session: the whole stack + UDP receiver + IBVS in
+# one command (start_udp.sh). Off-board detection over UDP -- NO on-board
+# ArUco (no cv2/numpy), NO RealSense, NO uav_ros_stack, NO OptiTrack.
+#
+# Lean on purpose (RAM): the old session.yml pulled in aruco_detector
+# (~120 MB cv2+numpy) and 6 rostopic-echo monitors (~37 MB each). This one
+# runs only what flies: roscore, mavros, udp_target_receiver, ibvs_controller,
+# and a single state monitor. The RC gate reads mavros/rc/in directly, so
+# rc_to_joy is not needed either.
+# ---------------------------------------------------------------------------
+windows:
+  - stack:
+      layout: tiled
+      panes:
+        - roscore
+        # mavros straight from ibvs_perching (config/apm_config.yaml).
+        - waitForRos; roslaunch ibvs_perching mavros_apm.launch fcu_url:=<%= @settings["fcu_url"] %>
+        # GUID_OPTIONS 0 => thrust is a CLIMB RATE (0.5 hover). GUID_OPTIONS 8
+        # (raw thrust) makes this controller fly away! Then bump stream rates.
+        - waitForRos; waitForMavros; waitForParams;
+          setParam GUID_OPTIONS 0;
+          rosrun mavros mavsys -n $UAV_NAMESPACE/mavros rate --all 50
+  - ibvs:
+      layout: tiled
+      panes:
+        # UDP receiver (PiOS pixel position -> ibvs/target_point) + controller.
+        # mission_mode + intrinsics + port all come from start_udp.sh.
+        - waitForRos; waitForMavros;
+          roslaunch ibvs_perching ibvs_udp.launch
+          config:=$(pwd)/custom_config/ibvs_params_rw.yaml
+          mission_mode:=<%= @settings["mission_mode"] %>
+          bind_port:=<%= @settings["bind_port"] %>
+          cx:=<%= @settings["cx"] %> cy:=<%= @settings["cy"] %>
+          fx:=<%= @settings["fx"] %> fy:=<%= @settings["fy"] %>
+        # single lightweight monitor: the IBVS state machine
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
+        # handy on-demand commands (loaded into history, not run):
+        - history -s "rostopic echo /$UAV_NAMESPACE/mavros/rc/in --noarr" ;
+          history -s "rostopic echo /$UAV_NAMESPACE/ibvs/target_point" ;
+          history -s "rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude" ;
+          history -s "rosservice call /$UAV_NAMESPACE/ibvs/stop" ;
+          history -s "rosservice call /$UAV_NAMESPACE/mavros/cmd/arming false"
