@@ -18,8 +18,6 @@ catkin_install_python(PROGRAMS
   scripts/udp_target_receiver.py
   scripts/rc_to_joy.py
   scripts/keyboard_rc.py
-  scripts/ibvs_viz.py
-  scripts/bench_fcu_stub.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
