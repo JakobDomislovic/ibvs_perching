@@ -30,7 +30,7 @@ windows:
       layout: tiled
       panes:
         # UDP receiver (PiOS pixel position -> ibvs/target_point) + controller.
-        # mission_mode + intrinsics + port all come from start_udp.sh.
+        # mission_mode + camera geometry + port all come from start_udp.sh.
         - waitForRos; waitForMavros;
           roslaunch ibvs_perching ibvs_udp.launch
           config:=$(pwd)/custom_config/ibvs_params_rw.yaml

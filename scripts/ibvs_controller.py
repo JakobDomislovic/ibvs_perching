@@ -12,13 +12,23 @@ VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
     The controller is agnostic to WHAT is being tracked. Any vision module
     (ArUco today, anything else tomorrow) publishes the point it wants
     centered in the camera image:
-        point.x  normalized horizontal offset from the image center,
-                 (u - cx) / fx, positive RIGHT in the image
-        point.y  normalized vertical offset from the image center,
-                 (v - cy) / fy, positive DOWN in the image
+        point.x  horizontal PIXEL POSITION of the detection in the image,
+                 positive RIGHT, from the image origin (top-left)
+        point.y  vertical PIXEL POSITION of the detection in the image,
+                 positive DOWN, from the image origin (top-left)
         point.z  IGNORED -- there is no range sensor. The vertical axis is
                  open-rate (descend for landing, climb for perching), not
                  target-relative.
+    The vision module publishes the POINT it sees and applies no geometry.
+    The setpoint lives here: ~target_x / ~target_y are the aim point in
+    pixels, defaulting to the image centre (~cx, ~cy) -- NOT (0, 0), which
+    would be the top-left corner. The controller forms the error as
+    `detection - aim point`, then divides by ~fx/~fy itself.
+
+    Raw pixels on the wire on purpose: the commanded body rate is a direct
+    function of that difference, so a detection can be read straight off
+    `rostopic echo ibvs/target_point` and checked against the rate that
+    comes out.
     Publishing on this topic at all means "target in sight": the state
     machine shows TAG_IN_SIGHT and ibvs/start will engage. The controller
     steers so the point goes to the image center (target_x/target_y offsets
@@ -46,27 +56,37 @@ Control split:
          perch_climb_thrust (> 0.5, climb) in perch mode; off-center or in
          any hold state it is hover_thrust. Landing then disarms on odometry
          altitude (land_disarm_height); perching is finished by the pilot.
-  - X-Y: closed-loop IBVS as a CASCADE. A raw body-rate command
-         proportional to position error is unstable (the rate integrates
-         into an unbounded tilt -- flight tested, it flips the vehicle),
-         so instead:
-             desired_tilt = PID_xy(tag position error)   (clamped small)
-             body_rate    = kp_att * (desired_tilt - current_tilt)
-         Attitude comes from odometry when available and from
-         mavros/imu/data otherwise, so the loop still closes with no EKF
-         position solution (no GPS / OptiTrack -- the real-world UDP
-         setup). Body velocity has no such fallback: without odometry the
-         damping term is zero and the tag loop is P+I only, and the
-         position-hold states command level attitude instead of holding a
-         point. All in the body FLU convention (mavros converts FLU->FRD
-         for MAVLink).
-         Sign conventions (FLU, ROS euler): +pitch = nose down = +x accel,
-         +roll = right side down = -y accel.
+  - X-Y: closed-loop IBVS computed ONLY from the detection's offset from
+         the image centre. NO attitude feedback of any kind: no IMU, no
+         AHRS, no odometry attitude. The pixel offset is reconstructed into
+         a body-frame error (divide by ~fx/~fy, scale by depth_guess) and
+         becomes a body rate directly:
 
-         The PID derivative term uses body velocity (d(err)/dt = -vel for
-         a stationary tag) instead of numerically differentiating the
-         detection -- same information, far less noise. With kd > 0 it is
-         exactly the velocity damping term of a classic tilt cascade.
+             body_rate = kp * error + kd * d(error)/dt    (clamped)
+
+         All in the body FLU convention (mavros converts FLU->FRD for
+         MAVLink). Sign conventions (FLU, ROS euler): +pitch = nose down =
+         +x accel, +roll = right side down = -y accel.
+
+         STABILITY -- read before touching the gains. Commanding a RATE
+         proportional to a POSITION error makes tilt the integral of that
+         error, i.e. a third-order loop:
+             x''' + c*x'' + g*kd*x' + g*kp*x = 0
+         The x'' coefficient c is aerodynamic drag ALONE -- the attitude
+         term used to supply it. Routh-Hurwitz then requires
+
+             c * kd > kp
+
+         so kd MUST be non-zero and kp must stay well under kd times the
+         drag coefficient (order 0.5-1 1/s on a multirotor). An earlier
+         version of this law with no D term at all was flight tested and
+         flipped the vehicle; that is the failure mode this constraint
+         avoids. Start conservative and increase kp slowly.
+
+         The derivative is the differentiated detection (computed in
+         target_callback from consecutive messages, EMA-filtered by
+         ~pid_xy/d_filter). Odometry body velocity is NOT used: it does not
+         exist in the real-world setup (no GPS / OptiTrack).
 
 State machine (this is what makes the controller "modal"):
 
@@ -84,10 +104,19 @@ State machine (this is what makes the controller "modal"):
     (ALIGN/ALIGNED) --(no tag for tag_timeout)--> TAG_LOST
     TAG_LOST --(tag seen again)--> ALIGN
 
-TAG_IN_SIGHT behaves exactly like HOVER (position hold at the same latched
-point); it is a status distinction for the operator: the detector currently
-sees the tag, so `ibvs/start` will engage immediately. Call ibvs/start when
-`ibvs/state` shows TAG_IN_SIGHT.
+TAG_IN_SIGHT behaves exactly like HOVER; it is a status distinction for the
+operator: the detector currently sees the tag, so `ibvs/start` will engage
+immediately. Call ibvs/start when `ibvs/state` shows TAG_IN_SIGHT.
+
+HOLD STATES AND ATTITUDE -- important consequence of having no attitude
+source: outside ALIGN/ALIGNED there is no detection to servo on, so the
+commanded body rates are zero. With IGNORE_ATTITUDE set, zero rate means
+"keep the current tilt", NOT "fly level". The vehicle does not self-level
+in WAIT_ARM/CLIMB/HOVER/TAG_IN_SIGHT/TAG_LOST, and there is no longer a
+position hold (that needed odometry position + attitude). Losing the tag
+mid-approach therefore leaves the vehicle at its last tilt: the safety
+pilot's RC mode switch is the recovery path, and TAG_LOST is a cue to take
+over, not a stable hover.
 
 Two-step mission (both std_srvs/Trigger):
     1. `ibvs/takeoff` -- switches to GUIDED_NOGPS, arms, climbs to
@@ -138,13 +167,9 @@ Thrust ("climb rate") per state:
     TAG_LOST  hover_thrust (hold altitude, wait for re-detection)
 """
 
-import math
-
 import rospy
-import tf.transformations as tft
-from geometry_msgs.msg import PointStamped, Vector3
+from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Imu
 from mavros_msgs.msg import AttitudeTarget, State
 from mavros_msgs.srv import CommandBool, SetMode
 from std_msgs.msg import String
@@ -268,30 +293,44 @@ class IbvsController:
         # loop converges and the tag falls out of frame (flight-tested)
         self.descend_xy_gate = rospy.get_param('~descend_xy_gate', 0.25)
 
-        # X-Y axis (IBVS cascade: PID on tag error -> desired tilt -> body rate)
-        self.target_x = rospy.get_param('~target_x', 0.0)
-        self.target_y = rospy.get_param('~target_y', 0.0)
-        self.max_tilt = rospy.get_param('~max_tilt', 0.15)
-        self.kp_att = rospy.get_param('~kp_att', 1.5)
+        # X-Y axis (direct law: target error -> body rate, NO attitude loop)
         self.max_body_rate = rospy.get_param('~max_body_rate', 0.35)
-        # Position hold outside ALIGN/ALIGNED. Level attitude alone does NOT
-        # hover in place: attitude trim bias (AHRS_TRIM in the FCU params)
-        # gives a constant lateral push, and velocity braking only limits the
-        # resulting drift to a terminal speed (flight-tested ~0.1 m/s,
-        # forever). Holding the latched position cancels the bias.
-        self.kp_hover = rospy.get_param('~kp_hover', 0.15)
-        self.kv_hover = rospy.get_param('~kv_hover', 0.25)
 
-        # PID gains (I and D default to 0 -- pure P until tuned otherwise).
-        # X-Y only: the vertical axis is open-rate (no range sensor), so there
-        # is no Z PID.
+        # Camera geometry. The vision module publishes the detection's PIXEL
+        # POSITION in the image and applies no geometry of its own; the
+        # setpoint lives HERE.
+        #   cx/cy  image centre [px] -- the default aim point
+        #   fx/fy  focal lengths [px] -- pixel offset -> normalized offset,
+        #          which depth_guess then scales into the body-frame metres
+        #          the gains are expressed in
+        self.cx = rospy.get_param('~cx', 640.0)
+        self.cy = rospy.get_param('~cy', 360.0)
+        self.fx = rospy.get_param('~fx', 251.0)
+        self.fy = rospy.get_param('~fy', 251.0)
+
+        # Where in the frame we want the detection to sit, in PIXELS.
+        # Defaults to the image CENTRE -- that is the aim point, not (0, 0),
+        # which would be the top-left corner. Override to bias the approach
+        # off-centre, or set to 0 if the detector already sends
+        # centre-relative values (then the centre is subtracted upstream).
+        self.target_x = rospy.get_param('~target_x', self.cx)
+        self.target_y = rospy.get_param('~target_y', self.cy)
+
+        # PID gains. NOTE the units changed with the law: kp is now rad/s per
+        # metre (a BODY RATE), not rad per metre (a tilt).
         kp_xy = rospy.get_param('~pid_xy/kp', 0.15)
         ki_xy = rospy.get_param('~pid_xy/ki', 0.0)
         kd_xy = rospy.get_param('~pid_xy/kd', 0.0)
         i_max_xy = rospy.get_param('~pid_xy/i_max', 0.05)
+        # The D term differentiates the detection, so it amplifies pixel
+        # jitter: one pixel of noise at 30 Hz is ~30 px/s. This EMA smooths
+        # it (1.0 = no filtering).
+        self.d_filter = rospy.get_param('~pid_xy/d_filter', 0.3)
 
-        self.pid_x = Pid(kp_xy, ki_xy, kd_xy, -self.max_tilt, self.max_tilt, i_max_xy)
-        self.pid_y = Pid(kp_xy, ki_xy, kd_xy, -self.max_tilt, self.max_tilt, i_max_xy)
+        self.pid_x = Pid(kp_xy, ki_xy, kd_xy,
+                         -self.max_body_rate, self.max_body_rate, i_max_xy)
+        self.pid_y = Pid(kp_xy, ki_xy, kd_xy,
+                         -self.max_body_rate, self.max_body_rate, i_max_xy)
 
         # State machine timing / thresholds
         self.climb_settle_time = rospy.get_param('~climb_settle_time', 3.0)
@@ -337,15 +376,14 @@ class IbvsController:
         # the vertical (climb/descend) is open-rate, not target-relative.
         self.t_x = None
         self.t_y = None
+        # d(target)/dt, differentiated from consecutive detections (filtered).
+        # This is the ONLY damping source in the loop now: there is no
+        # attitude feedback, and odometry velocity does not exist in the
+        # real-world setup (no GPS / OptiTrack).
+        self.t_x_dot = 0.0
+        self.t_y_dot = 0.0
         self.last_tag_time = None
         self.last_odom = None
-        # Attitude fallback. odom needs an EKF POSITION solution, which this
-        # setup has no source for (no GPS, no OptiTrack, no flow) -- in the
-        # real world mavros/local_position/odom simply never publishes, and
-        # the whole cascade used to collapse to zero rates because of it.
-        # mavros/imu/data carries the FCU's AHRS attitude in the same ENU/FLU
-        # convention and is available as soon as mavros connects.
-        self.last_imu = None
         # (x, y) in the local frame that HOVER/TAG_LOST hold on to
         self.hold_position = None
 
@@ -360,7 +398,6 @@ class IbvsController:
         rospy.Subscriber('ibvs/target_point', PointStamped, self.target_callback, queue_size=1)
         rospy.Subscriber('mavros/local_position/odom', Odometry,
                          self.odom_callback, queue_size=1)
-        rospy.Subscriber('mavros/imu/data', Imu, self.imu_callback, queue_size=1)
 
         self.set_mode_srv = rospy.ServiceProxy('mavros/set_mode', SetMode)
         self.arming_srv = rospy.ServiceProxy('mavros/cmd/arming', CommandBool)
@@ -428,18 +465,41 @@ class IbvsController:
         self.mode = msg.mode
 
     def target_callback(self, msg):
-        """Vision-module point -> pseudo target position in body FLU.
+        """Vision-module PIXEL POSITION -> pseudo target position in body FLU.
 
-        Only the normalized image offset (point.x/point.y) is used; point.z
-        is ignored (there is no range sensor). The offset is scaled by the
-        fixed depth_guess into a body X-Y error for the centering loop; the
-        image_*_sign knobs map the image axes to the body frame for the
-        down (land) vs up (perch) camera.
+        point.x/point.y are where the detection sits in the image, in whole
+        pixels (positive right / positive down); point.z is ignored (there
+        is no range sensor). The error is formed HERE, against the aim point
+        (target_x, target_y) -- the image centre by default. Dividing that
+        pixel error by fx/fy gives the normalized offset, which the fixed
+        depth_guess scales into a body X-Y error for the centering loop; the
+        image_*_sign knobs map the image axes to the body frame for the down
+        (land) vs up (perch) camera.
+
+        The derivative of the error is taken here, from consecutive
+        detections and their real time delta, rather than in the control
+        loop -- the detector is slower than control_rate, so differentiating
+        per control tick would read zero between detections.
         """
+        # pixel error: how far the detection is from where we want it
+        offset_x = msg.point.x - self.target_x
+        offset_y = msg.point.y - self.target_y
+
         depth = self.depth_guess
-        self.t_x = depth * self.image_x_sign * msg.point.x
-        self.t_y = -depth * self.image_y_sign * msg.point.y
-        self.last_tag_time = rospy.Time.now()
+        t_x = depth * self.image_x_sign * offset_x / self.fx
+        t_y = -depth * self.image_y_sign * offset_y / self.fy
+        now = rospy.Time.now()
+
+        if self.t_x is not None and self.last_tag_time is not None:
+            dt = (now - self.last_tag_time).to_sec()
+            if dt > 1e-3:
+                a = self.d_filter
+                self.t_x_dot = (1.0 - a) * self.t_x_dot + a * (t_x - self.t_x) / dt
+                self.t_y_dot = (1.0 - a) * self.t_y_dot + a * (t_y - self.t_y) / dt
+
+        self.t_x = t_x
+        self.t_y = t_y
+        self.last_tag_time = now
 
         # real world: this point is the "go autonomous" signal
         if self.engage_armed and self.armed and self.state == WAIT_ARM:
@@ -474,26 +534,6 @@ class IbvsController:
     def odom_callback(self, msg):
         self.last_odom = msg
 
-    def imu_callback(self, msg):
-        self.last_imu = msg
-
-    def current_attitude(self):
-        """(roll, pitch, yaw) in body FLU, or None if no attitude source yet.
-
-        Odometry is preferred (it is the same estimate the velocity and
-        position terms come from), but it requires an EKF position solution.
-        The IMU's AHRS attitude uses the same ENU/FLU convention and needs
-        no position estimate, so it keeps the attitude loop alive when
-        flying without GPS/OptiTrack.
-        """
-        if self.last_odom is not None:
-            q = self.last_odom.pose.pose.orientation
-        elif self.last_imu is not None:
-            q = self.last_imu.orientation
-        else:
-            return None
-        return tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
-
     def latch_hold_position(self):
         if self.last_odom is not None:
             p = self.last_odom.pose.pose.position
@@ -509,6 +549,10 @@ class IbvsController:
             if new_state == ALIGN and self.state not in (ALIGN, ALIGNED):
                 self.pid_x.reset()
                 self.pid_y.reset()
+                # drop the stale derivative too: the detection gap across a
+                # TAG_LOST would otherwise show up as a huge d(error)/dt
+                self.t_x_dot = 0.0
+                self.t_y_dot = 0.0
             # Latch the spot the hold states keep: the takeoff point when
             # CLIMB starts, or wherever the vehicle is when servoing stops /
             # the tag is lost. HOVER <-> TAG_IN_SIGHT keep the same latch
@@ -582,12 +626,15 @@ class IbvsController:
         return ready_to_fly
 
     def lateral_error(self):
-        """Distance of the tracked point from the desired image center [m],
-        in the body frame, or None without a detection."""
+        """Distance of the tracked point from the aim point [m], in the body
+        frame, or None without a detection.
+
+        t_x/t_y are already relative to the aim point (target_callback
+        subtracts it in pixels), so this is just their norm.
+        """
         if self.t_x is None:
             return None
-        return ((self.target_x - self.t_x) ** 2 +
-                (self.target_y - self.t_y) ** 2) ** 0.5
+        return (self.t_x ** 2 + self.t_y ** 2) ** 0.5
 
     def compute_thrust(self):
         """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
@@ -664,74 +711,55 @@ class IbvsController:
             rospy.logerr("ibvs_controller: disarm failed: %s", exc)
 
     def compute_body_rates(self):
-        """Cascade: tag position error -> desired tilt -> body rate.
+        """Direct law: target error -> body rate. NO attitude feedback.
 
-        The attitude loop must stay active in EVERY flying state (including
-        ALIGNED and TAG_LOST) -- with IGNORE_ATTITUDE set, a zero body rate
-        means "keep the current tilt", which would fly away. Level flight is
-        desired_tilt = 0, not rate = 0.
+        The rate is computed purely from where the detection sits relative
+        to the image centre -- nothing in this path reads the IMU, the AHRS
+        or any attitude estimate. The pixel offset is reconstructed into a
+        body-frame error in target_callback (fx/fy + depth_guess); here it
+        becomes a body rate directly:
+
+            body_rate = kp * error + kd * d(error)/dt      (clamped)
+
+        Outside ALIGN/ALIGNED there is no detection to servo on -- by
+        definition, that is what those states mean -- so the rates are zero.
+        NOTE: with IGNORE_ATTITUDE set, a zero body rate means "keep the
+        current tilt", NOT "fly level". The vehicle therefore does not
+        self-level in the hold states; the safety pilot's RC mode switch is
+        what recovers it.
         """
-        att = self.current_attitude()
-        if att is None:
+        if self.state not in (ALIGN, ALIGNED) or self.t_x is None:
             return 0.0, 0.0
-        roll, pitch, yaw = att
 
-        # Damping term of the cascade. It needs a VELOCITY estimate, so
-        # without odometry it drops to zero and the tag loop runs P+I only
-        # (more oscillatory -- back kp_xy off if it hunts).
-        vel = (self.last_odom.twist.twist.linear
-               if self.last_odom is not None else Vector3())
+        # Target position error in body FLU. t_x/t_y are already measured
+        # from the aim point (target_callback subtracts target_x/target_y in
+        # pixels), so the desired body-frame offset is zero and the error is
+        # simply -t.
+        err_x = -self.t_x
+        err_y = -self.t_y
+        error_norm = (err_x ** 2 + err_y ** 2) ** 0.5
 
-        # Default (CLIMB/HOVER/TAG_LOST): hold the latched position. Level
-        # attitude alone is NOT a hover -- attitude trim bias pushes the
-        # vehicle sideways and velocity braking only caps the drift, so a
-        # position P-term is needed to actually stand still. Same cascade
-        # signs as the tag law, with the latched point playing the tag.
-        desired_pitch = 0.0
-        desired_roll = 0.0
-        if self.hold_position is not None and self.last_odom is not None \
-                and self.state in HOLD_STATES:
-            pos = self.last_odom.pose.pose.position
-            ex = self.hold_position[0] - pos.x
-            ey = self.hold_position[1] - pos.y
-            # local ENU error -> body FLU (yaw only)
-            cy = math.cos(yaw)
-            sy = math.sin(yaw)
-            err_bx = cy * ex + sy * ey
-            err_by = -sy * ex + cy * ey
-            desired_pitch = clamp(self.kp_hover * err_bx - self.kv_hover * vel.x,
-                                  -self.max_tilt, self.max_tilt)
-            desired_roll = clamp(-self.kp_hover * err_by + self.kv_hover * vel.y,
-                                 -self.max_tilt, self.max_tilt)
+        if self.state == ALIGN:
+            if error_norm < self.align_tolerance:
+                if self.aligned_since is None:
+                    self.aligned_since = rospy.Time.now()
+                elif (rospy.Time.now() - self.aligned_since).to_sec() >= self.align_dwell_time:
+                    self.transition(ALIGNED)
+            else:
+                self.aligned_since = None
+        elif error_norm > self.align_tolerance * self.align_hysteresis:
+            self.transition(ALIGN)
 
-        if self.state in (ALIGN, ALIGNED) and self.t_x is not None:
-            # target position error in body FLU (from the image point)
-            err_x = self.target_x - self.t_x
-            err_y = self.target_y - self.t_y
-            error_norm = (err_x ** 2 + err_y ** 2) ** 0.5
+        # We must fly TOWARD the tag. FLU sign conventions:
+        #   +pitch rate = nose down = +x accel -> pitch error = tag_x - target_x
+        #   +roll  rate = right down = -y accel -> roll error = target_y - tag_y
+        # The D term opposes the error's rate of change (t_*_dot is the
+        # differentiated detection; d(err_x)/dt = +d(t_x)/dt with these signs).
+        pitch_rate = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
+        roll_rate = self.pid_y.update(err_y, -self.t_y_dot, self.dt)
 
-            if self.state == ALIGN:
-                if error_norm < self.align_tolerance:
-                    if self.aligned_since is None:
-                        self.aligned_since = rospy.Time.now()
-                    elif (rospy.Time.now() - self.aligned_since).to_sec() >= self.align_dwell_time:
-                        self.transition(ALIGNED)
-                else:
-                    self.aligned_since = None
-            elif error_norm > self.align_tolerance * self.align_hysteresis:
-                self.transition(ALIGN)
-
-            # We must fly TOWARD the tag. FLU sign conventions:
-            #   +pitch = nose down = +x accel  ->  pitch error = tag_x - target_x
-            #   +roll  = right down = -y accel ->  roll error  = target_y - tag_y
-            desired_pitch = self.pid_x.update(-err_x, -vel.x, self.dt)
-            desired_roll = self.pid_y.update(err_y, vel.y, self.dt)
-
-        roll_rate = clamp(self.kp_att * (desired_roll - roll),
-                          -self.max_body_rate, self.max_body_rate)
-        pitch_rate = clamp(self.kp_att * (desired_pitch - pitch),
-                           -self.max_body_rate, self.max_body_rate)
-        return roll_rate, pitch_rate
+        return (clamp(roll_rate, -self.max_body_rate, self.max_body_rate),
+                clamp(pitch_rate, -self.max_body_rate, self.max_body_rate))
 
     def control_loop(self, _event):
         self.update_state_machine()

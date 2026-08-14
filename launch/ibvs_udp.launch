@@ -24,20 +24,26 @@
   <arg name="bind_ip"   default="0.0.0.0"/>
   <arg name="bind_port" default="5005"/>
 
-  <!-- Intrinsics of the PiOS camera: turn the target's pixel position into
-       the normalized offset the controller's gains are tuned for. cx/cy are
-       the image center (principal point), fx/fy the focal lengths. MUST match
-       the resolution the detector runs at. If PiOS sends center-relative
-       errors instead of absolute px/py, set cx:=0 cy:=0.
+  <!-- PiOS camera geometry. ALL of it belongs to the CONTROLLER: the
+       receiver forwards the detection's raw pixel position and applies no
+       geometry, so there is exactly one place the image centre is defined.
+       cx/cy are the aim point (the controller's ~target_x/~target_y default
+       to them); fx/fy turn the resulting pixel error into body-frame metres
+       together with depth_guess. All four MUST match the resolution the
+       detector runs at.
+       If PiOS sends centre-relative errors instead of absolute px/py, set
+       cx:=0 cy:=0 so the centre is not subtracted twice (fx/fy are still
+       required either way).
 
-       PiOS camera is now the DSJ-3079-HE (USB UVC, detection_pipeline's
+       PiOS camera is the DSJ-3079-HE (USB UVC, detection_pipeline's
        DSJSource.py), captured at 1280x720:
          cx = 640, cy = 360 (image center, exact, pure resolution math)
        fx/fy are NOT yet calibrated for this camera. The values below are
        carried over from the previous Nicla camera and are WRONG for the
-       DSJ. Run detection_pipeline/calibrate_camera.py (checkerboard
-       calibration) and replace fx/fy with its output before relying on the
-       Z/lateral gain scaling for real flight. -->
+       DSJ; they scale the X-Y loop gain, so an incorrect value shows up as
+       a mis-tuned (too hot or too sluggish) lateral response. Run
+       detection_pipeline/calibrate_camera.py (checkerboard calibration) and
+       replace fx/fy with its output before relying on the tuning. -->
   <arg name="cx" default="640.0"/>
   <arg name="cy" default="360.0"/>
   <arg name="fx" default="251.0"/>  <!-- TODO: uncalibrated for DSJ, see comment above -->
@@ -45,24 +51,27 @@
 
   <group ns="$(arg namespace)">
 
-    <!-- UDP receiver: PiOS target pixel position -> ibvs/target_point -->
+    <!-- UDP receiver: PiOS detection -> ibvs/target_point (the raw pixel
+         POSITION of the detection, whole pixels; no geometry applied) -->
     <node pkg="ibvs_perching" type="udp_target_receiver.py"
           name="udp_target_receiver" output="screen">
       <param name="bind_ip"   value="$(arg bind_ip)"/>
       <param name="bind_port" value="$(arg bind_port)"/>
-      <param name="cx"        value="$(arg cx)"/>
-      <param name="cy"        value="$(arg cy)"/>
-      <param name="fx"        value="$(arg fx)"/>
-      <param name="fy"        value="$(arg fy)"/>
     </node>
 
     <!-- IBVS controller: centers on the target, then descends+disarms (land)
-         or climbs toward the branch (perch). mission_mode here OVERRIDES the
-         value loaded from the config file. (last param wins) -->
+         or climbs toward the branch (perch). mission_mode and the camera
+         geometry here OVERRIDE the values loaded from the config file.
+         (last param wins) The controller owns the aim point: ~target_x /
+         ~target_y default to cx/cy, i.e. the image centre. -->
     <node pkg="ibvs_perching" type="ibvs_controller.py"
           name="ibvs_controller" output="screen">
       <rosparam file="$(arg config)" command="load"/>
       <param name="mission_mode" value="$(arg mission_mode)"/>
+      <param name="cx"           value="$(arg cx)"/>
+      <param name="cy"           value="$(arg cy)"/>
+      <param name="fx"           value="$(arg fx)"/>
+      <param name="fy"           value="$(arg fy)"/>
     </node>
 
   </group>

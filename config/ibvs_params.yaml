@@ -80,8 +80,15 @@ depth_guess: 2.0              # [m] fixed scale from the normalized image offset
 # A raw rate command proportional to position error is UNSTABLE (the rate
 # integrates into an unbounded tilt); the attitude inner loop is required.
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired relative tag x (forward) offset [m]
-target_y: 0.0                 # desired relative tag y (left) offset [m]
+# target_x / target_y -- the AIM POINT in the image, in PIXELS. Not set
+# here: the controller defaults them to cx/cy (the image centre). Setting
+# them to 0 would aim at the TOP-LEFT CORNER of the frame, not the centre.
+# NOTE this file is the SIM config, and the sim vision modules
+# (aruco_detector.py / mock_ar_tag_publisher.py) still publish NORMALIZED
+# offsets rather than pixel positions -- the sim path needs converting
+# before it matches the controller (see cx/cy below).
+cx: 320.0                     # [px] sim camera is 640x480 -> centre 320,240
+cy: 240.0
 descend_xy_gate: 0.25         # [m] descend only while centered within this radius
                               # (keeps the tag inside the shrinking camera FOV)
 

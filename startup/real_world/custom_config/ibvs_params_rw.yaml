@@ -64,8 +64,12 @@ depth_guess: 2.0              # [m] fixed scale from the normalized image offset
 # X-Y axis -- closed-loop IBVS cascade on the target image error:
 #   desired_tilt = PID_xy(error), body_rate = kp_att * (tilt error)
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired relative target x (forward) offset [m]
-target_y: 0.0                 # desired relative target y (left) offset [m]
+# target_x / target_y -- the AIM POINT in the image, in PIXELS. Deliberately
+# NOT set here: the controller defaults them to cx/cy (the image centre,
+# passed from start_udp.sh via ibvs_udp.launch), which is what we want.
+# Setting them to 0 would aim at the TOP-LEFT CORNER of the frame, not the
+# centre. Set them only to bias the approach off-centre, or to 0 if the
+# detector already sends centre-relative values.
 descend_xy_gate: 0.25         # [m] descend/climb only while centered within this
 
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
