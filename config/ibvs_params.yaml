@@ -94,11 +94,10 @@ pid_xy:
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback timeout if takeoff_height is never reached
-align_tolerance: 0.08         # frame-fraction error norm below this counts as
-                              # "aligned" -- retune by flying it, this replaces
-                              # the old metric [m] tolerance
+align_tolerance_px: 20         # [px] target must be within this many pixels of
+                              # center to count as "aligned" -- retune by flying it
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
-align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
+align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no tag message within this time -> TAG_LOST
                               # (short: at 30 fps detection, 0.5 s of silence
                               # is a real loss, not a dropped frame)

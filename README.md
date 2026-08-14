@@ -381,7 +381,7 @@ Parameters (all private, loaded from
 | `kv_hover` | `0.25` | velocity damping for the position hold [rad per m/s] |
 | `auto_start` | `false` | skip the `ibvs/start` gate: takeoff flows straight into ALIGN |
 | `climb_settle_time` | `10.0` | `CLIMB` fallback timeout if `takeoff_height` is never reached [s] |
-| `align_tolerance` | `0.08` | X-Y error norm (frame-fraction) considered aligned — retune from the metric-era default, units changed |
+| `align_tolerance_px` | `20` | X-Y pixel-space distance from center considered aligned [px] — retune by flying it |
 | `align_dwell_time` | `2.0` | time within tolerance before `ALIGNED` [s] |
 | `align_hysteresis` | `1.5` | tolerance multiplier to leave `ALIGNED` |
 | `tag_timeout` | `0.5` | detection staleness threshold [s] |
@@ -485,8 +485,8 @@ camera in `rqt_image_view` on `ibvs/debug_image`):
    not `takeoff_height`) — **no descent yet** (§11): no depth means the
    controller cannot know how far above the tag it is, and no depth-free
    descent strategy is enabled for now either.
-4. `ALIGNED`: error norm < `align_tolerance` for 2 s → holding centered at
-   `hold_height`.
+4. `ALIGNED`: pixel-space error < `align_tolerance_px` for 2 s → holding
+   centered at `hold_height`.
 
 There is intentionally **no** `control_manager` takeoff service call — no
 tracker/controller is running; the `CLIMB` state *is* the takeoff. Note that

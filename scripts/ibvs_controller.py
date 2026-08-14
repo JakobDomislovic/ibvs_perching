@@ -249,7 +249,11 @@ class IbvsController:
 
         # State machine timing / thresholds
         self.climb_settle_time = rospy.get_param('~climb_settle_time', 3.0)
-        self.align_tolerance = rospy.get_param('~align_tolerance', 0.15)
+        # Alignment check is done in PIXELS (unlike the frame-fraction error
+        # that drives the PID cascade above) -- easy to reason about against
+        # a live video feed ("must be within 20 px of center"), and exact
+        # regardless of image aspect ratio (see compute_body_rates).
+        self.align_tolerance_px = rospy.get_param('~align_tolerance_px', 20.0)
         self.align_dwell_time = rospy.get_param('~align_dwell_time', 2.0)
         self.align_hysteresis = rospy.get_param('~align_hysteresis', 1.5)
         self.tag_timeout = rospy.get_param('~tag_timeout', 1.0)
@@ -572,20 +576,30 @@ class IbvsController:
                                  -self.max_tilt, self.max_tilt)
 
         if self.state in (ALIGN, ALIGNED) and self.t_x is not None:
-            # target error as a frame-fraction (from the pixel point)
+            # target error as a frame-fraction (from the pixel point) --
+            # this is what drives the PID cascade below, kept
+            # resolution-independent on purpose (see module docstring).
             err_x = self.target_x - self.t_x
             err_y = self.target_y - self.t_y
-            error_norm = (err_x ** 2 + err_y ** 2) ** 0.5
+
+            # The ALIGN/ALIGNED check, however, is done in raw PIXELS: scale
+            # each frame-fraction error back out by its own half-dimension
+            # to recover the true (possibly non-square) pixel-space
+            # distance, e.g. "must be within 20 px of center" regardless of
+            # image_width/image_height.
+            error_px_x = err_x * (self.image_width / 2.0)
+            error_px_y = err_y * (self.image_height / 2.0)
+            error_norm_px = (error_px_x ** 2 + error_px_y ** 2) ** 0.5
 
             if self.state == ALIGN:
-                if error_norm < self.align_tolerance:
+                if error_norm_px < self.align_tolerance_px:
                     if self.aligned_since is None:
                         self.aligned_since = rospy.Time.now()
                     elif (rospy.Time.now() - self.aligned_since).to_sec() >= self.align_dwell_time:
                         self.transition(ALIGNED)
                 else:
                     self.aligned_since = None
-            elif error_norm > self.align_tolerance * self.align_hysteresis:
+            elif error_norm_px > self.align_tolerance_px * self.align_hysteresis:
                 self.transition(ALIGN)
 
             # We must fly TOWARD the tag. FLU sign conventions:
