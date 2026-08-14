@@ -91,7 +91,7 @@ Control split:
 State machine (this is what makes the controller "modal"):
 
     WAIT_ARM --(ibvs/takeoff called; armed & GUIDED_NOGPS confirmed)--> CLIMB
-    WAIT_ARM --(engage_on_target; armed; point received)--> ALIGN / TAG_LOST
+    WAIT_ARM --(engage_on_target; pilot selects GUIDED_NOGPS; servoing on)--> ALIGN / TAG_LOST
     CLIMB --(takeoff_height reached, servoing NOT started)--> HOVER / TAG_IN_SIGHT
     CLIMB --(takeoff_height reached, started & tag seen)--> ALIGN
     CLIMB --(takeoff_height reached, started, NO tag)--> TAG_LOST
@@ -129,33 +129,28 @@ Two-step mission (both std_srvs/Trigger):
     straight into ALIGN).
 
 REAL WORLD (~engage_on_target: true, see startup/real_world):
-    The safety pilot flies the vehicle manually (e.g. STABILIZE) and a
-    fresh `ibvs/target_point` engages the controller -- no takeoff
-    service and no position_hold-style handshake. With
-    ~engage_needs_start: true (the shipped configs) engagement is
-    BUTTON-GATED: the pilot calls `ibvs/start` first ('i' on the sim
-    keyboard joystick, a joystick button on the real RC) and the next
-    point is what engages; with it false the very first point engages.
-    On engagement (while armed) the controller switches the FCU to
-    GUIDED_NOGPS itself and, once mavros/state confirms armed +
-    GUIDED_NOGPS, goes straight to ALIGN (the vehicle is already
-    airborne, CLIMB is skipped).
-    The software mode switch is ONE-SHOT: if the safety pilot takes back
-    control with the RC mode switch, the controller never grabs the mode
-    again on its own -- flipping the RC switch back to GUIDED_NOGPS
-    re-engages (servoing stays enabled), and `ibvs/start` re-arms the
-    one-shot so the next target point can engage again. `ibvs/stop`
-    disables servoing as usual.
+    The safety pilot flies the vehicle manually (e.g. STABILIZE). Two
+    things must both be true before the controller does anything:
+        1. servoing enabled  -- `ibvs/start` ('i' on the sim keyboard
+           joystick, a joystick button on the real RC), or ~auto_start
+        2. the PILOT selects GUIDED_NOGPS on the RC mode switch
+    Then the controller goes straight to ALIGN (the vehicle is already
+    airborne, CLIMB is skipped). `ibvs/stop` disables servoing again, and
+    flipping the RC mode switch away from GUIDED_NOGPS hands control back
+    instantly, from any state.
 
-ENGAGEMENT:
-    Nothing is primed at node startup: servoing follows ~auto_start and the
-    mid-flight mode seizure follows ~engage_on_target / ~engage_needs_start.
-    With ~engage_needs_start false the first fresh target point while armed
-    seizes GUIDED_NOGPS; with it true `ibvs/start` must be called first and
-    the NEXT point is what engages. Once engaged the FCU mode is the
-    interlock (ArduPilot obeys these setpoints only in GUIDED_NOGPS), so the
-    safety pilot takes back control with the RC mode switch. `ibvs/stop`
-    disables servoing again.
+ENGAGEMENT -- THE FCU MODE IS THE PILOT'S:
+    This node NEVER switches the flight mode on its own. Only the explicit
+    `ibvs/takeoff` service (an operator action) may command GUIDED_NOGPS.
+    Seeing a target point does not engage anything, and neither does
+    arming.
+
+    It used to work the other way: a fresh target point while armed made
+    the controller seize GUIDED_NOGPS itself. That meant arming on the
+    bench with the tag in view threw the vehicle into GUIDED_NOGPS
+    instantly, which is exactly the surprise this design avoids. The mode
+    is now the interlock in both directions -- ArduPilot obeys these
+    setpoints only in GUIDED_NOGPS, and only the pilot puts it there.
 
 Thrust ("climb rate") per state:
     WAIT_ARM  hover_thrust (neutral; ignored anyway while disarmed)
@@ -346,23 +341,17 @@ class IbvsController:
         # the climb happens only after the ibvs/takeoff service is called.
         self.takeoff_requested = False
         # Real-world engagement gate: the vehicle is flown MANUALLY (e.g.
-        # STABILIZE) and publishing on ibvs/target_point IS the "go
-        # autonomous" signal (replaces the position_hold handshake of the
-        # uav_ros_stack). On the first fresh point while armed the
-        # controller switches the FCU to GUIDED_NOGPS itself and goes
+        # STABILIZE) and the SAFETY PILOT decides when the controller takes
+        # over, by flipping the RC mode switch to GUIDED_NOGPS. Once armed
+        # and in GUIDED_NOGPS with servoing started, the controller goes
         # straight to ALIGN -- no takeoff/climb, it is already airborne.
-        # engage_armed makes the software mode switch ONE-SHOT: after a
-        # safety-pilot RC takeover the controller never steals the mode
-        # back just because the vision module keeps publishing; call
-        # ibvs/start to re-arm it.
+        #
+        # The controller NEVER changes the FCU mode by itself. It used to
+        # seize GUIDED_NOGPS as soon as it saw a target point while armed,
+        # which meant simply arming on the bench (with the tag in view)
+        # threw the vehicle into GUIDED_NOGPS instantly. The mode is the
+        # pilot's, and only the explicit ibvs/takeoff service may change it.
         self.engage_on_target = rospy.get_param('~engage_on_target', False)
-        # Button-gated engagement: when true, the controller does NOT
-        # engage on the very first point -- somebody must call ibvs/start
-        # first ('i' on the sim keyboard joystick, a joystick button on
-        # the real RC). The point that arrives after the button press is
-        # what engages.
-        self.engage_needs_start = rospy.get_param('~engage_needs_start', False)
-        self.engage_armed = self.engage_on_target and not self.engage_needs_start
 
 
         self.state = WAIT_ARM
@@ -449,10 +438,8 @@ class IbvsController:
         self.servo_active = True
         self.landed = False
         self._land_ready_since = None
-        # re-arm the one-shot mid-flight engagement (real world): the next
-        # fresh target point may switch the FCU to GUIDED_NOGPS again
-        self.engage_armed = self.engage_on_target
-        rospy.loginfo("ibvs_controller: servoing STARTED (ibvs/start)")
+        rospy.loginfo("ibvs_controller: servoing STARTED (ibvs/start) -- "
+                      "flip the RC mode switch to GUIDED_NOGPS to engage")
         return TriggerResponse(success=True, message="IBVS servoing started")
 
     def handle_stop(self, _req):
@@ -501,35 +488,9 @@ class IbvsController:
         self.t_y = t_y
         self.last_tag_time = now
 
-        # real world: this point is the "go autonomous" signal
-        if self.engage_armed and self.armed and self.state == WAIT_ARM:
-            self.request_engage()
-
-    def request_engage(self):
-        """Seize control mid-flight (real world): GUIDED_NOGPS + servoing.
-
-        Called on the first fresh target point while the vehicle is flown
-        manually. One-shot: engage_armed stays False afterwards, so after a
-        safety-pilot RC takeover the controller cannot grab the mode back
-        on its own -- the pilot re-engages with the RC mode switch, or
-        ibvs/start re-arms this. The actual ALIGN transition happens in the
-        state machine only once mavros/state confirms armed + GUIDED_NOGPS.
-        """
-        self.engage_armed = False
-        self.servo_active = True
-        rospy.loginfo("ibvs_controller: target point received while flying "
-                      "manually -> engaging (GUIDED_NOGPS)")
-        if self.mode == State.MODE_APM_COPTER_GUIDED_NOGPS:
-            return
-        try:
-            mode_res = self.set_mode_srv(
-                base_mode=0, custom_mode=State.MODE_APM_COPTER_GUIDED_NOGPS)
-            if not mode_res.mode_sent:
-                rospy.logerr("ibvs_controller: engage failed -- set_mode "
-                             "GUIDED_NOGPS rejected; call ibvs/start to re-arm")
-        except rospy.ServiceException as exc:
-            rospy.logerr("ibvs_controller: engage failed -- mavros service "
-                         "error: %s; call ibvs/start to re-arm", exc)
+        # NOTE: seeing a target point does NOT engage anything. The FCU mode
+        # belongs to the safety pilot; the controller only ever acts once
+        # mavros/state reports armed + GUIDED_NOGPS (see update_state_machine).
 
     def odom_callback(self, msg):
         self.last_odom = msg
@@ -587,10 +548,10 @@ class IbvsController:
             if self.takeoff_requested:
                 self.transition(CLIMB)
             # Mid-flight engagement (real world): the vehicle is already
-            # airborne, skip CLIMB and servo right away. Reached either by
-            # the software mode switch after a target point (request_engage)
-            # or by the safety pilot flipping the RC switch to GUIDED_NOGPS
-            # while servoing is enabled.
+            # airborne, skip CLIMB and servo right away. Reached ONLY by the
+            # safety pilot flipping the RC switch to GUIDED_NOGPS while
+            # servoing is enabled (ibvs/start) -- the controller does not
+            # select the mode itself.
             elif self.engage_on_target and self.servo_active:
                 self.transition(ALIGN if self.tag_is_fresh() else TAG_LOST)
         elif self.state == CLIMB:

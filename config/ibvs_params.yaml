@@ -119,7 +119,10 @@ pid_xy:
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback timeout if takeoff_height is never reached
-align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_tolerance: 0.30         # [m] |error| below this counts as "aligned"
+                              # (doubled from 0.15 so a bigger error still
+                              # counts as aligned; widens the ALIGNED exit
+                              # threshold to 0.45 m via align_hysteresis)
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
 tag_timeout: 0.5              # [s] no tag message within this time -> TAG_LOST

@@ -92,7 +92,12 @@ pid_xy:
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
-align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_tolerance: 0.30         # [m] |error| below this counts as "aligned"
+                              # (doubled from 0.15: a bigger error still counts
+                              # as aligned, so ALIGNED latches more easily.
+                              # At fx=251/depth_guess=2.0 this is ~38 px of
+                              # image error; it also widens the ALIGNED exit
+                              # threshold to 0.45 m via align_hysteresis.)
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST
