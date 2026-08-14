@@ -2,7 +2,8 @@ name: ibvs_perching_udp
 root: ./
 startup_window: ibvs
 # All settings come from start_udp.sh (fcu_url, mission_mode, namespace,
-# bind_port, cx/cy/fx/fy) -- DO NOT edit them here, edit start_udp.sh.
+# bind_port, image_width/image_height) -- DO NOT edit them here, edit
+# start_udp.sh.
 pre_window: export UAV_NAMESPACE=<%= @settings["namespace"] %> && source ./shell_helpers.sh
 # ---------------------------------------------------------------------------
 # CONSOLIDATED real-world session: the whole stack + UDP receiver + IBVS in
@@ -30,14 +31,14 @@ windows:
       layout: tiled
       panes:
         # UDP receiver (PiOS pixel position -> ibvs/target_point) + controller.
-        # mission_mode + intrinsics + port all come from start_udp.sh.
+        # mission_mode + image resolution + port all come from start_udp.sh.
         - waitForRos; waitForMavros;
           roslaunch ibvs_perching ibvs_udp.launch
           config:=$(pwd)/custom_config/ibvs_params_rw.yaml
           mission_mode:=<%= @settings["mission_mode"] %>
           bind_port:=<%= @settings["bind_port"] %>
-          cx:=<%= @settings["cx"] %> cy:=<%= @settings["cy"] %>
-          fx:=<%= @settings["fx"] %> fy:=<%= @settings["fy"] %>
+          image_width:=<%= @settings["image_width"] %>
+          image_height:=<%= @settings["image_height"] %>
         # single lightweight monitor: the IBVS state machine
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point

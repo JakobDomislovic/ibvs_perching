@@ -19,15 +19,13 @@ MISSION_MODE=land                # land = down cam, descend+disarm | perch = up 
 UAV_NAMESPACE=red                # ROS namespace for mavros + ibvs
 
 BIND_PORT=5005                   # UDP port the PiOS detector sends to
-# PiOS camera intrinsics -- DSJ-3079-HE (USB UVC) @ 1280x720.
-# These MUST match the resolution the PiOS detector reports px/py in (if it
+# Camera resolution -- DSJ-3079-HE (USB UVC) @ 1280x720. No intrinsics, no
+# calibration needed: this is the ONLY camera setting either node needs.
+# MUST match the resolution the PiOS detector reports px/py in (if it
 # downscales before detection, use the DOWNSCALED size here, not the capture
-# size). cx/cy are exact resolution math; fx/fy are NOT calibrated -- see
-# ibvs_udp.launch. Verify by centering the tag and reading the incoming px/py.
-CX=640.0                         # image center x [px] = width/2
-CY=360.0                         # image center y [px] = height/2
-FX=251.0                         # focal length x [px] -- TODO: uncalibrated, carried
-FY=251.0                         # focal length y [px]    over from the Nicla camera
+# size). Verify by centering the tag and reading the incoming px/py.
+IMAGE_WIDTH=1280                 # [px]
+IMAGE_HEIGHT=720                 # [px]
 # ---------------------------------------------------------------------------
 
 # work from this script's directory
@@ -46,4 +44,4 @@ tmuxinator ibvs_perching_udp \
   mission_mode="$MISSION_MODE" \
   namespace="$UAV_NAMESPACE" \
   bind_port="$BIND_PORT" \
-  cx="$CX" cy="$CY" fx="$FX" fy="$FY"
+  image_width="$IMAGE_WIDTH" image_height="$IMAGE_HEIGHT"

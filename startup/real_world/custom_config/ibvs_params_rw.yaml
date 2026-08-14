@@ -19,6 +19,12 @@
 # ---------------------------------------------------------------------------
 mission_mode: land
 
+# NOTE: ~image_width/~image_height (the camera resolution -- the only thing
+# the controller needs to know about the camera; no intrinsics, no
+# calibration) are NOT set here -- set them, together, on the controller AND
+# udp_target_receiver via the launch file's image_width/image_height args
+# (see launch/ibvs_udp.launch and start_udp.sh), so they can't drift.
+
 # Image->body sign per axis (absorb the camera flip + detector pixel-sign
 # convention). Defaults suit the down-facing landing camera; the up-facing
 # perch camera typically needs one or both at -1.0 -- VERIFY before flying.
@@ -50,23 +56,21 @@ takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 perch_climb_thrust: 0.55      # PERCH: constant climb while centered on the branch
 land_descend_thrust: 0.45     # LAND: constant slow descent while centered
 
-# LAND terminal: disarm once centered (within descend_xy_gate) and below
+# LAND terminal: disarm once centered (within descend_xy_gate_px) and below
 # land_disarm_height (odometry altitude), held for land_disarm_dwell seconds.
 disarm_on_land: true
 land_disarm_height: 0.15      # [m] odometry altitude below which disarm triggers
 land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 
-depth_guess: 2.0              # [m] fixed scale from the normalized image offset
-                              # to the pseudo body error; sets the X-Y loop gain
-                              # together with pid_xy, never causes Z motion
-
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the target image error:
-#   desired_tilt = PID_xy(error), body_rate = kp_att * (tilt error)
+# X-Y axis -- closed-loop IBVS cascade on the target's pixel error, as a
+# FRACTION of the half-frame (0 = centered, +-1 = frame edge):
+#   desired_tilt = PID_xy(frame-fraction error), body_rate = kp_att * (tilt error)
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired relative target x (forward) offset [m]
-target_y: 0.0                 # desired relative target y (left) offset [m]
-descend_xy_gate: 0.25         # [m] descend/climb only while centered within this
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+descend_xy_gate_px: 60         # [px] descend/climb only while centered within this
+                              # many pixels of center -- retune by flying it
 
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
 kp_att: 1.5                   # body rate per rad of attitude error [1/s]
@@ -75,20 +79,23 @@ kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]
 kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
 
 # ---------------------------------------------------------------------------
-# PID gains (flight-tested starting point, same as simulation). X-Y only --
-# the vertical axis is open-rate, there is no Z PID.
+# PID gains -- carried over numerically from the old metric gains as a
+# STARTING POINT ONLY. The error is now dimensionless (frame-fraction,
+# roughly -1..1 instead of unbounded meters): retune by flying it.
+# X-Y only -- the vertical axis is open-rate, there is no Z PID.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.10                    # desired tilt per meter of target error [rad/m]
-  ki: 0.0                     # [rad per m*s]
-  kd: 0.15                    # [rad per m/s] velocity damping -- keep > 0
+  kp: 0.10                    # desired tilt per unit of frame-fraction error [rad]
+  ki: 0.0                     # [rad/s]
+  kd: 0.15                    # [rad per unit/s] velocity damping -- keep > 0
   i_max: 0.05                 # [rad] max integral contribution
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
-align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_tolerance_px: 20         # [px] target must be within this many pixels of
+                              # center to count as "aligned" -- retune by flying it
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
-align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
+align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST

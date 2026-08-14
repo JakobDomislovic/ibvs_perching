@@ -16,6 +16,12 @@ control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 # ---------------------------------------------------------------------------
 mission_mode: land
 
+# NOTE: ~image_width/~image_height (the camera resolution -- the only thing
+# the controller needs to know about the camera; no intrinsics, no
+# calibration) are NOT set here -- set them, together, on the controller AND
+# the vision module (udp_target_receiver / aruco_detector) via the launch
+# file's image_width/image_height args, so they can't drift.
+
 # Image->body sign per axis (see ibvs_controller.py). The vision interface is
 # fixed (point.x positive RIGHT, point.y positive DOWN); these absorb the
 # camera flip (down vs up mount) and the detector's pixel-sign convention.
@@ -34,7 +40,7 @@ perch_climb_thrust: 0.55
 # open-rate and the terminal disarm uses odometry altitude.
 land_descend_thrust: 0.45
 
-# LAND: touchdown -> disarm once centered (within descend_xy_gate) and below
+# LAND: touchdown -> disarm once centered (within descend_xy_gate_px) and below
 # land_disarm_height, held for land_disarm_dwell seconds (debounce). Set
 # disarm_on_land false to descend-and-hold instead of cutting the motors.
 disarm_on_land: true
@@ -68,22 +74,18 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] CLIMB ends when odometry z reaches this
 
-depth_guess: 2.0              # [m] fixed scale from the normalized image offset
-                              # to the pseudo body error; sets the X-Y loop gain
-                              # together with pid_xy, never causes Z motion
-
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the tag position error
-# (expressed in the body FLU frame: x-forward, y-left, z-up):
-#   desired_tilt = PID_xy(tag error)                  (clamped to max_tilt)
-#   body_rate    = kp_att * (desired_tilt - current_tilt)
+# X-Y axis -- closed-loop IBVS cascade on the target's pixel error, as a
+# FRACTION of the half-frame (0 = centered, +-1 = frame edge):
+#   desired_tilt = PID_xy(frame-fraction error), body_rate = kp_att * (tilt error)
 # A raw rate command proportional to position error is UNSTABLE (the rate
 # integrates into an unbounded tilt); the attitude inner loop is required.
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired relative tag x (forward) offset [m]
-target_y: 0.0                 # desired relative tag y (left) offset [m]
-descend_xy_gate: 0.25         # [m] descend only while centered within this radius
-                              # (keeps the tag inside the shrinking camera FOV)
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+descend_xy_gate_px: 60         # [px] descend/climb only while centered within this
+                              # many pixels of center (keeps the tag inside the
+                              # shrinking camera FOV) -- retune by flying it
 
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
 kp_att: 1.5                   # body rate per rad of attitude error [1/s]
@@ -96,25 +98,28 @@ kv_hover: 0.25                # velocity damping for the position hold [rad per 
 
 # ---------------------------------------------------------------------------
 # PID gains. I and D start at 0 (pure P) -- raise them only when tuning.
-# The D-term uses body velocity from odometry (equivalent to velocity
-# damping; kd_xy ~ 0.25 was flight-tested and smooths the approach).
-# i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
+# The error is dimensionless (frame-fraction, roughly -1..1 instead of
+# unbounded meters) -- these numeric values are carried over from the old
+# metric gains as a STARTING POINT ONLY; retune by flying it. The D-term
+# uses body velocity from odometry as a damping proxy (NEEDED while
+# descending/climbing: with kd 0 the undamped X-Y oscillation outruns the
+# shrinking FOV and the tag leaves the frame). i_max bounds the INTEGRAL
+# CONTRIBUTION (anti-windup), not the raw sum.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.15                    # desired tilt per meter of tag error [rad/m]
-  ki: 0.002                   # [rad per m*s]
-  kd: 0.15                    # [rad per m/s] -- NEEDED while descending/climbing:
-                              # with kd 0 the undamped X-Y oscillation outruns
-                              # the shrinking FOV and the tag leaves the frame
+  kp: 0.15                    # desired tilt per unit of frame-fraction error [rad]
+  ki: 0.002                   # [rad/s]
+  kd: 0.15                    # [rad per unit/s] velocity damping
   i_max: 0.05                 # [rad] max integral contribution
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback timeout if takeoff_height is never reached
-align_tolerance: 0.15         # [m] |error| below this counts as "aligned"
+align_tolerance_px: 20         # [px] target must be within this many pixels of
+                              # center to count as "aligned" -- retune by flying it
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
-align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
+align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no tag message within this time -> TAG_LOST
                               # (short: at 30 fps detection, 0.5 s of silence is
                               # a real loss, and stale-data descent near the

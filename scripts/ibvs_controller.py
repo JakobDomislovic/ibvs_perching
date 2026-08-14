@@ -9,20 +9,21 @@ switching (GUIDED_NOGPS) are done by the ibvs/takeoff service -- this node
 only ever streams AttitudeTarget setpoints.
 
 VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
-    The controller is agnostic to WHAT is being tracked. Any vision module
-    (ArUco today, anything else tomorrow) publishes the point it wants
-    centered in the camera image:
-        point.x  normalized horizontal offset from the image center,
-                 (u - cx) / fx, positive RIGHT in the image
-        point.y  normalized vertical offset from the image center,
-                 (v - cy) / fy, positive DOWN in the image
+    The controller is agnostic to WHAT is being tracked and needs NO camera
+    calibration. Any vision module (on-board ArUco, or the off-board PiOS
+    detector via udp_target_receiver) publishes the PIXEL coordinates of
+    the point it wants centered in the camera image:
+        point.x  pixel column (u), 0 .. image_width
+        point.y  pixel row (v), 0 .. image_height
         point.z  IGNORED -- there is no range sensor. The vertical axis is
                  open-rate (descend for landing, climb for perching), not
                  target-relative.
     Publishing on this topic at all means "target in sight": the state
-    machine shows TAG_IN_SIGHT and ibvs/start will engage. The controller
-    steers so the point goes to the image center (target_x/target_y offsets
-    are available).
+    machine shows TAG_IN_SIGHT and ibvs/start will engage. ~image_width /
+    ~image_height must be set (once, in the launch file) to the SAME
+    resolution the vision module is using, so the controller can find the
+    frame center and express the error as a resolution-independent
+    frame-fraction (see target_callback).
 
     The camera mount is selected by mission_mode (land = down, perch = up);
     the image->body axis mapping is set by image_x_sign / image_y_sign so
@@ -235,6 +236,13 @@ class IbvsController:
         self.image_x_sign = rospy.get_param('~image_x_sign', 1.0)
         self.image_y_sign = rospy.get_param('~image_y_sign', 1.0)
 
+        # Camera resolution -- the ONLY thing the controller needs to know
+        # about the camera (no intrinsics, no calibration). Must match the
+        # vision module publishing ibvs/target_point (set once, together, in
+        # the launch file).
+        self.image_width = rospy.get_param('~image_width', 640)
+        self.image_height = rospy.get_param('~image_height', 480)
+
         # PERCH: constant climb-rate command sent while centered on the
         # branch above (> hover_thrust = climb). Held to thrust_max.
         self.perch_climb_thrust = rospy.get_param('~perch_climb_thrust', 0.55)
@@ -259,14 +267,11 @@ class IbvsController:
         self.thrust_min = rospy.get_param('~thrust_min', 0.35)
         self.thrust_max = rospy.get_param('~thrust_max', 0.7)
         self.takeoff_height = rospy.get_param('~takeoff_height', 2.0)
-        # fixed scale from the normalized image offset to the pseudo body
-        # position error -- there is no depth sensor, so this constant just
-        # sets the X-Y loop gain together with pid_xy (never used for Z)
-        self.depth_guess = rospy.get_param('~depth_guess', 2.0)
-        # descend/climb only while laterally centered on the tag: moving
-        # vertically off-center shrinks the camera FOV faster than the X-Y
-        # loop converges and the tag falls out of frame (flight-tested)
-        self.descend_xy_gate = rospy.get_param('~descend_xy_gate', 0.25)
+        # descend/climb only while laterally centered on the tag, in PIXELS
+        # (see lateral_error_px): moving vertically off-center shrinks the
+        # camera FOV faster than the X-Y loop converges and the tag falls
+        # out of frame (flight-tested) -- retune by flying it
+        self.descend_xy_gate_px = rospy.get_param('~descend_xy_gate_px', 60.0)
 
         # X-Y axis (IBVS cascade: PID on tag error -> desired tilt -> body rate)
         self.target_x = rospy.get_param('~target_x', 0.0)
@@ -295,7 +300,11 @@ class IbvsController:
 
         # State machine timing / thresholds
         self.climb_settle_time = rospy.get_param('~climb_settle_time', 3.0)
-        self.align_tolerance = rospy.get_param('~align_tolerance', 0.15)
+        # Alignment check is done in PIXELS (unlike the frame-fraction error
+        # that drives the PID cascade above) -- easy to reason about against
+        # a live video feed ("must be within 20 px of center"), and exact
+        # regardless of image aspect ratio (see lateral_error_px).
+        self.align_tolerance_px = rospy.get_param('~align_tolerance_px', 20.0)
         self.align_dwell_time = rospy.get_param('~align_dwell_time', 2.0)
         self.align_hysteresis = rospy.get_param('~align_hysteresis', 1.5)
         self.tag_timeout = rospy.get_param('~tag_timeout', 1.0)
@@ -428,17 +437,17 @@ class IbvsController:
         self.mode = msg.mode
 
     def target_callback(self, msg):
-        """Vision-module point -> pseudo target position in body FLU.
-
-        Only the normalized image offset (point.x/point.y) is used; point.z
-        is ignored (there is no range sensor). The offset is scaled by the
-        fixed depth_guess into a body X-Y error for the centering loop; the
-        image_*_sign knobs map the image axes to the body frame for the
-        down (land) vs up (perch) camera.
+        """Vision-module pixel point -> lateral error, as a fraction of the
+        half-frame (independent of image_width/image_height, so gains and
+        tolerances don't need retuning if the camera resolution changes).
+        point.z is ignored -- there is no range sensor. image_x_sign /
+        image_y_sign map the image axes to the body frame for the down
+        (land) vs up (perch) camera.
         """
-        depth = self.depth_guess
-        self.t_x = depth * self.image_x_sign * msg.point.x
-        self.t_y = -depth * self.image_y_sign * msg.point.y
+        norm_x = (msg.point.x - self.image_width / 2.0) / (self.image_width / 2.0)
+        norm_y = (msg.point.y - self.image_height / 2.0) / (self.image_height / 2.0)
+        self.t_x = self.image_x_sign * norm_x
+        self.t_y = -self.image_y_sign * norm_y
         self.last_tag_time = rospy.Time.now()
 
         # real world: this point is the "go autonomous" signal
@@ -581,13 +590,17 @@ class IbvsController:
 
         return ready_to_fly
 
-    def lateral_error(self):
-        """Distance of the tracked point from the desired image center [m],
-        in the body frame, or None without a detection."""
+    def lateral_error_px(self):
+        """Distance of the tracked point from the desired image center [px],
+        or None without a detection. Scales the frame-fraction error back
+        out by its own half-dimension to recover the true (possibly
+        non-square) pixel-space distance, e.g. "must be within 20 px of
+        center" regardless of image_width/image_height."""
         if self.t_x is None:
             return None
-        return ((self.target_x - self.t_x) ** 2 +
-                (self.target_y - self.t_y) ** 2) ** 0.5
+        err_x_px = (self.target_x - self.t_x) * (self.image_width / 2.0)
+        err_y_px = (self.target_y - self.t_y) * (self.image_height / 2.0)
+        return (err_x_px ** 2 + err_y_px ** 2) ** 0.5
 
     def compute_thrust(self):
         """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
@@ -600,8 +613,8 @@ class IbvsController:
         # Range is ignored; the safety pilot commits the final grab manually.
         if self.mission_mode == MODE_PERCH:
             if self.state in (ALIGN, ALIGNED):
-                lateral_error = self.lateral_error()
-                if lateral_error is not None and lateral_error <= self.descend_xy_gate:
+                lateral_error_px = self.lateral_error_px()
+                if lateral_error_px is not None and lateral_error_px <= self.descend_xy_gate_px:
                     return min(self.perch_climb_thrust, self.thrust_max)
             return self.hover_thrust
 
@@ -609,9 +622,9 @@ class IbvsController:
         # Descend ONLY while laterally centered -- descending off-center drops
         # the target out of the shrinking FOV (flight-tested funnel).
         if self.state in (ALIGN, ALIGNED):
-            lateral_error = self.lateral_error()
-            centered = (lateral_error is not None and
-                        lateral_error <= self.descend_xy_gate)
+            lateral_error_px = self.lateral_error_px()
+            centered = (lateral_error_px is not None and
+                        lateral_error_px <= self.descend_xy_gate_px)
             if centered:
                 return max(self.land_descend_thrust, self.thrust_min)
             return self.hover_thrust
@@ -633,8 +646,8 @@ class IbvsController:
             self._land_ready_since = None
             return
 
-        lateral_error = self.lateral_error()
-        if lateral_error is None or lateral_error > self.descend_xy_gate:
+        lateral_error_px = self.lateral_error_px()
+        if lateral_error_px is None or lateral_error_px > self.descend_xy_gate_px:
             self._land_ready_since = None
             return
 
@@ -705,20 +718,25 @@ class IbvsController:
                                  -self.max_tilt, self.max_tilt)
 
         if self.state in (ALIGN, ALIGNED) and self.t_x is not None:
-            # target position error in body FLU (from the image point)
+            # target error as a frame-fraction (from the pixel point) --
+            # this is what drives the PID cascade below, kept
+            # resolution-independent on purpose (see module docstring).
             err_x = self.target_x - self.t_x
             err_y = self.target_y - self.t_y
-            error_norm = (err_x ** 2 + err_y ** 2) ** 0.5
+
+            # The ALIGN/ALIGNED check, however, is done in raw PIXELS (see
+            # lateral_error_px).
+            error_norm_px = self.lateral_error_px()
 
             if self.state == ALIGN:
-                if error_norm < self.align_tolerance:
+                if error_norm_px < self.align_tolerance_px:
                     if self.aligned_since is None:
                         self.aligned_since = rospy.Time.now()
                     elif (rospy.Time.now() - self.aligned_since).to_sec() >= self.align_dwell_time:
                         self.transition(ALIGNED)
                 else:
                     self.aligned_since = None
-            elif error_norm > self.align_tolerance * self.align_hysteresis:
+            elif error_norm_px > self.align_tolerance_px * self.align_hysteresis:
                 self.transition(ALIGN)
 
             # We must fly TOWARD the tag. FLU sign conventions:
@@ -748,7 +766,7 @@ class IbvsController:
         msg.body_rate.x = roll_rate
         msg.body_rate.y = pitch_rate
         msg.body_rate.z = 0.0
-        msg.thrust = thrust #samo za probu
+        msg.thrust = thrust
         self.setpoint_pub.publish(msg)
 
 

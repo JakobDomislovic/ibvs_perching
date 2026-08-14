@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
 
+"""
+UDP vision module for the IBVS controller.
+
+The companion computer (PiOS) detects the target and streams its pixel
+position over UDP as a JSON datagram; this node republishes it as
+ibvs/target_point (geometry_msgs/PointStamped), speaking the SAME
+calibration-free interface as aruco_detector.py -- see the VISION MODULE
+INTERFACE in ibvs_controller.py:
+    point.x  pixel column (u), 0 .. image_width
+    point.y  pixel row (v), 0 .. image_height
+    point.z  unused, always 0.0
+
+No camera intrinsics are needed: the controller normalizes by
+image_width/image_height itself (set here and on the controller, together,
+in the launch file), exactly like the on-board ArUco detector.
+"""
+
 import json
 import socket
 
@@ -16,22 +33,13 @@ class UdpTargetReceiver:
         port = int(rospy.get_param('~bind_port', 5005))
         timeout = float(rospy.get_param('~timeout', 0.5))
 
-        # Intrinsics of the PiOS camera (pixel position -> normalized offset).
-        self.fx = float(rospy.get_param('~fx', 600.0))
-        self.fy = float(rospy.get_param('~fy', 600.0))
-        # Image center / principal point [px]. Set to 0 if PiOS already sends
-        # center-relative errors (error_x/error_y) instead of absolute px/py.
-        self.cx = float(rospy.get_param('~cx', 0.0))
-        self.cy = float(rospy.get_param('~cy', 0.0))
+        # Must match the resolution the PiOS detector reports px/py in (if it
+        # downscales before detection, use the DOWNSCALED size here, not the
+        # capture size), and must match the controller's ~image_width /
+        # ~image_height (set once, together, in the launch file).
+        self.image_width = float(rospy.get_param('~image_width', 640))
+        self.image_height = float(rospy.get_param('~image_height', 480))
         self.frame_id = rospy.get_param('~frame_id', 'camera')
-
-        if self.fx == 0.0 or self.fy == 0.0:
-            rospy.logfatal("udp_target_receiver: fx/fy must be non-zero")
-            raise rospy.ROSInitException("fx/fy must be non-zero")
-        if self.cx == 0.0 or self.cy == 0.0:
-            rospy.logwarn("udp_target_receiver: cx/cy are 0 -- treating incoming "
-                          "px/py as ALREADY center-relative. Set ~cx/~cy to the "
-                          "image center if PiOS sends absolute pixel positions.")
 
         self.point_pub = rospy.Publisher('ibvs/target_point', PointStamped, queue_size=1)
 
@@ -40,32 +48,34 @@ class UdpTargetReceiver:
         self.sock.bind((ip, port))
         self.sock.settimeout(timeout)
 
-        rospy.loginfo("udp_target_receiver: bound to %s:%d, fx=%.1f fy=%.1f "
-                      "cx=%.1f cy=%.1f", ip, port, self.fx, self.fy, self.cx, self.cy)
+        rospy.loginfo("udp_target_receiver: bound to %s:%d, image %dx%d",
+                      ip, port, self.image_width, self.image_height)
 
     def parse(self, data):
-        """JSON datagram -> (error_x_px, error_y_px), center-relative.
+        """JSON datagram -> (u, v), absolute pixel coordinates.
 
-        Accepts absolute pixel positions (px/py, offset by cx/cy) or already
-        center-relative errors (error_x/error_y). Raises on missing/bad data.
+        Accepts absolute pixel positions (px/py) directly, or
+        center-relative pixel offsets (error_x/error_y) which are shifted
+        back to absolute using image_width/image_height. Raises on
+        missing/bad data.
         """
         d = json.loads(data.decode('utf-8'))
         if 'px' in d or 'py' in d:
-            error_x = float(d.get('px', 0.0)) - self.cx
-            error_y = float(d.get('py', 0.0)) - self.cy
+            u = float(d.get('px', 0.0))
+            v = float(d.get('py', 0.0))
         elif 'error_x' in d or 'error_y' in d:
-            error_x = float(d.get('error_x', 0.0))
-            error_y = float(d.get('error_y', 0.0))
+            u = self.image_width / 2.0 + float(d.get('error_x', 0.0))
+            v = self.image_height / 2.0 + float(d.get('error_y', 0.0))
         else:
             raise KeyError("packet has neither px/py nor error_x/error_y")
-        return error_x, error_y
+        return u, v
 
-    def publish(self, error_x, error_y):
+    def publish(self, u, v):
         msg = PointStamped()
         msg.header.stamp = rospy.Time.now()
         msg.header.frame_id = self.frame_id
-        msg.point.x = error_x / self.fx
-        msg.point.y = error_y / self.fy
+        msg.point.x = u
+        msg.point.y = v
         msg.point.z = 0.0
         self.point_pub.publish(msg)
 
@@ -80,12 +90,12 @@ class UdpTargetReceiver:
                 continue
 
             try:
-                error_x, error_y = self.parse(data)
+                u, v = self.parse(data)
             except (ValueError, KeyError, TypeError) as exc:
                 rospy.logwarn_throttle(5.0, "udp_target_receiver: bad packet: %s" % exc)
                 continue
 
-            self.publish(error_x, error_y)
+            self.publish(u, v)
 
     def shutdown(self):
         self.sock.close()
