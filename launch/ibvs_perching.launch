@@ -17,12 +17,19 @@
 
   <!-- Real ArUco detection (default) vs the odometry-based mock.
        Both are "vision modules": they publish ibvs/target_point
-       (PointStamped: x,y = normalized offset from the image center,
-       z = distance if known else 0). Swap in your own detector by
-       publishing the same topic. -->
+       (PointStamped: x,y = target pixel column/row, 0..image_width/height;
+       z unused, no depth). Swap in your own detector by publishing the
+       same topic; no camera calibration required, just image_width/
+       image_height matching below. -->
   <arg name="use_mock_tag" default="false"/>
   <arg name="tag_world_position" default="[0.0, 0.0, 0.02]"/>
   <arg name="odom_topic" default="mavros/local_position/odom"/>
+
+  <!-- Camera resolution: the ONLY thing the controller needs to know about
+       the camera. Set ONCE here so the controller and vision module can
+       never drift out of sync (640x480 = the kopterworx down camera). -->
+  <arg name="image_width" default="640"/>
+  <arg name="image_height" default="480"/>
 
   <!-- AR tag model spawned on the floor at the world origin -->
   <arg name="spawn_ar_tag" default="true"/>
@@ -33,13 +40,14 @@
 
     <node pkg="ibvs_perching" type="ibvs_controller.py" name="ibvs_controller" output="screen">
       <rosparam file="$(arg config)" command="load"/>
+      <param name="image_width" value="$(arg image_width)"/>
+      <param name="image_height" value="$(arg image_height)"/>
     </node>
 
     <!-- vision module: down-facing camera -> point to center (ibvs/target_point) -->
     <node unless="$(arg use_mock_tag)"
           pkg="ibvs_perching" type="aruco_detector.py" name="aruco_detector" output="screen">
       <param name="marker_id" value="0"/>
-      <param name="marker_length" value="0.20"/>
       <param name="process_rate" value="15.0"/>
       <param name="dictionary" value="DICT_4X4_50"/>
     </node>
@@ -47,6 +55,8 @@
     <node if="$(arg use_mock_tag)"
           pkg="ibvs_perching" type="mock_ar_tag_publisher.py" name="mock_ar_tag_publisher" output="screen">
       <param name="odom_topic" value="$(arg odom_topic)"/>
+      <param name="image_width" value="$(arg image_width)"/>
+      <param name="image_height" value="$(arg image_height)"/>
       <rosparam param="tag_world_position" subst_value="true">$(arg tag_world_position)</rosparam>
     </node>
 

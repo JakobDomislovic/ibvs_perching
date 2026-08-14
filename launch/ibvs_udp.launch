@@ -24,30 +24,18 @@
   <arg name="bind_ip"   default="0.0.0.0"/>
   <arg name="bind_port" default="5005"/>
 
-  <!-- PiOS camera geometry. ALL of it belongs to the CONTROLLER: the
-       receiver forwards the detection's raw pixel position and applies no
-       geometry, so there is exactly one place the image centre is defined.
-       cx/cy are the aim point (the controller's ~target_x/~target_y default
-       to them); fx/fy turn the resulting pixel error into body-frame metres
-       together with depth_guess. All four MUST match the resolution the
-       detector runs at.
-       If PiOS sends centre-relative errors instead of absolute px/py, set
-       cx:=0 cy:=0 so the centre is not subtracted twice (fx/fy are still
-       required either way).
+  <!-- PiOS camera RESOLUTION. This is the ONLY camera knowledge the stack
+       needs: the controller normalizes the detection's pixel position by each
+       axis' half-dimension, so the error is +-1.0 at that axis' frame edge.
+       NO focal length, NO principal point, NO CALIBRATION, which also means
+       gains and tolerances survive a resolution change.
 
-       PiOS camera is the DSJ-3079-HE (USB UVC, detection_pipeline's
-       DSJSource.py), captured at 1280x720:
-         cx = 640, cy = 360 (image center, exact, pure resolution math)
-       fx/fy are NOT yet calibrated for this camera. The values below are
-       carried over from the previous Nicla camera and are WRONG for the
-       DSJ; they scale the X-Y loop gain, so an incorrect value shows up as
-       a mis-tuned (too hot or too sluggish) lateral response. Run
-       detection_pipeline/calibrate_camera.py (checkerboard calibration) and
-       replace fx/fy with its output before relying on the tuning. -->
-  <arg name="cx" default="640.0"/>
-  <arg name="cy" default="360.0"/>
-  <arg name="fx" default="251.0"/>  <!-- TODO: uncalibrated for DSJ, see comment above -->
-  <arg name="fy" default="251.0"/>  <!-- TODO: uncalibrated for DSJ, see comment above -->
+       MUST match the resolution the PiOS detector reports px/py in. If it
+       downscales before detecting, use the DOWNSCALED size, not the capture
+       size. PiOS camera is the DSJ-3079-HE (USB UVC, detection_pipeline's
+       DSJSource.py) captured at 1280x720. -->
+  <arg name="image_width"  default="1280"/>
+  <arg name="image_height" default="720"/>
 
   <group ns="$(arg namespace)">
 
@@ -62,16 +50,15 @@
     <!-- IBVS controller: centers on the target, then descends+disarms (land)
          or climbs toward the branch (perch). mission_mode and the camera
          geometry here OVERRIDE the values loaded from the config file.
-         (last param wins) The controller owns the aim point: ~target_x /
-         ~target_y default to cx/cy, i.e. the image centre. -->
+         (last param wins) The controller normalizes the incoming pixel
+         position against image_width/image_height; ~target_x / ~target_y are
+         a frame-fraction offset, 0.0 = centred. -->
     <node pkg="ibvs_perching" type="ibvs_controller.py"
           name="ibvs_controller" output="screen">
       <rosparam file="$(arg config)" command="load"/>
       <param name="mission_mode" value="$(arg mission_mode)"/>
-      <param name="cx"           value="$(arg cx)"/>
-      <param name="cy"           value="$(arg cy)"/>
-      <param name="fx"           value="$(arg fx)"/>
-      <param name="fy"           value="$(arg fy)"/>
+      <param name="image_width"  value="$(arg image_width)"/>
+      <param name="image_height" value="$(arg image_height)"/>
     </node>
 
   </group>

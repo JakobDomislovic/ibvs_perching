@@ -20,10 +20,11 @@ VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
                  open-rate (descend for landing, climb for perching), not
                  target-relative.
     The vision module publishes the POINT it sees and applies no geometry.
-    The setpoint lives here: ~target_x / ~target_y are the aim point in
-    pixels, defaulting to the image centre (~cx, ~cy) -- NOT (0, 0), which
-    would be the top-left corner. The controller forms the error as
-    `detection - aim point`, then divides by ~fx/~fy itself.
+    The controller normalizes it against ~image_width / ~image_height, each
+    axis by its OWN half-dimension, so the error is +-1.0 at that axis'
+    frame edge. NO camera calibration is involved anywhere in the chain.
+    ~target_x / ~target_y are the desired offset as a frame-fraction, and
+    0.0 is dead centre.
 
     Raw pixels on the wire on purpose: the commanded body rate is a direct
     function of that difference, so a detection can be read straight off
@@ -58,11 +59,18 @@ Control split:
          altitude (land_disarm_height); perching is finished by the pilot.
   - X-Y: closed-loop IBVS computed ONLY from the detection's offset from
          the image centre. NO attitude feedback of any kind: no IMU, no
-         AHRS, no odometry attitude. The pixel offset is reconstructed into
-         a body-frame error (divide by ~fx/~fy, scale by depth_guess) and
-         becomes a body rate directly:
+         AHRS, no odometry attitude. The pixel offset is normalized per axis
+         to a frame-fraction (+-1.0 at the frame edge) and becomes a body
+         rate directly:
 
              body_rate = kp * error + kd * d(error)/dt    (clamped)
+
+         kp is therefore the rate commanded AT the frame edge. Normalizing
+         each axis by its own half-dimension is what keeps a 16:9 frame
+         symmetric: with a single focal length the wide axis reached 640 px
+         against the short axis' 360 px, so only the wide one hit the rate
+         clamp (bench tested: pitch pegged at 0.35 while roll topped out at
+         0.29 and could never saturate).
 
          All in the body FLU convention (mavros converts FLU->FRD for
          MAVLink). Sign conventions (FLU, ROS euler): +pitch = nose down =
@@ -97,8 +105,8 @@ State machine (this is what makes the controller "modal"):
     CLIMB --(takeoff_height reached, started, NO tag)--> TAG_LOST
     HOVER <--(tag detection appears / disappears)--> TAG_IN_SIGHT
     HOVER/TAG_IN_SIGHT --(ibvs/start called & tag seen)--> ALIGN
-    ALIGN --(|error| < tol for align_dwell_time)--> ALIGNED
-    ALIGNED --(|error| > tol * hysteresis)--> ALIGN
+    ALIGN --(|error| < align_tolerance_px for align_dwell_time)--> ALIGNED
+    ALIGNED --(|error| > align_tolerance_px * hysteresis)--> ALIGN
     (any state) --(disarmed / mode changed)--> WAIT_ARM
     (any flying state) --(ibvs/stop called)--> HOVER
     (ALIGN/ALIGNED) --(no tag for tag_timeout)--> TAG_LOST
@@ -279,47 +287,47 @@ class IbvsController:
         self.thrust_min = rospy.get_param('~thrust_min', 0.35)
         self.thrust_max = rospy.get_param('~thrust_max', 0.7)
         self.takeoff_height = rospy.get_param('~takeoff_height', 2.0)
-        # fixed scale from the normalized image offset to the pseudo body
-        # position error -- there is no depth sensor, so this constant just
-        # sets the X-Y loop gain together with pid_xy (never used for Z)
-        self.depth_guess = rospy.get_param('~depth_guess', 2.0)
-        # descend/climb only while laterally centered on the tag: moving
-        # vertically off-center shrinks the camera FOV faster than the X-Y
-        # loop converges and the tag falls out of frame (flight-tested)
-        self.descend_xy_gate = rospy.get_param('~descend_xy_gate', 0.25)
+        # descend/climb only while laterally centered on the tag, in PIXELS:
+        # moving vertically off-center shrinks the camera FOV faster than the
+        # X-Y loop converges and the tag falls out of frame (flight-tested).
+        # Keep this LARGER than align_tolerance_px, otherwise the vehicle can
+        # report ALIGNED and still refuse to descend.
+        self.descend_xy_gate_px = rospy.get_param('~descend_xy_gate_px', 60.0)
 
         # X-Y axis (direct law: target error -> body rate, NO attitude loop)
         self.max_body_rate = rospy.get_param('~max_body_rate', 0.35)
 
-        # Camera geometry. The vision module publishes the detection's PIXEL
-        # POSITION in the image and applies no geometry of its own; the
-        # setpoint lives HERE.
-        #   cx/cy  image centre [px] -- the default aim point
-        #   fx/fy  focal lengths [px] -- pixel offset -> normalized offset,
-        #          which depth_guess then scales into the body-frame metres
-        #          the gains are expressed in
-        self.cx = rospy.get_param('~cx', 640.0)
-        self.cy = rospy.get_param('~cy', 360.0)
-        self.fx = rospy.get_param('~fx', 251.0)
-        self.fy = rospy.get_param('~fy', 251.0)
+        # Camera RESOLUTION -- the only camera knowledge the controller needs.
+        # The vision module publishes the detection's PIXEL POSITION and
+        # applies no geometry; the controller normalizes it to a fraction of
+        # the half-frame, so the error is +-1.0 at the frame edges on BOTH
+        # axes. No focal length, no principal point, NO CALIBRATION: gains
+        # and tolerances stay valid if the camera resolution changes.
+        #
+        # This replaces the earlier fx/fy + depth_guess reconstruction, which
+        # made the error a physical distance but needed a calibrated focal
+        # length. With fx=fy on a 16:9 frame the x axis could reach 640 px
+        # while y stopped at 360 px, so only x hit the rate clamp (bench
+        # tested: pitch pegged at 0.35 while roll topped out at 0.29).
+        # Normalizing per axis puts both edges at 1.0 and removes that
+        # asymmetry.
+        self.image_width = rospy.get_param('~image_width', 1280)
+        self.image_height = rospy.get_param('~image_height', 720)
 
-        # Where in the frame we want the detection to sit, in PIXELS.
-        # Defaults to the image CENTRE -- that is the aim point, not (0, 0),
-        # which would be the top-left corner. Override to bias the approach
-        # off-centre, or set to 0 if the detector already sends
-        # centre-relative values (then the centre is subtracted upstream).
-        self.target_x = rospy.get_param('~target_x', self.cx)
-        self.target_y = rospy.get_param('~target_y', self.cy)
+        # Desired lateral offset as a frame-fraction; 0.0 = dead centre.
+        # The centre is subtracted by the normalization, so 0 IS the centre
+        # here (unlike the pixel-aim-point scheme this replaces).
+        self.target_x = rospy.get_param('~target_x', 0.0)
+        self.target_y = rospy.get_param('~target_y', 0.0)
 
-        # PID gains. NOTE the units changed with the law: kp is now rad/s per
-        # metre (a BODY RATE), not rad per metre (a tilt).
+        # PID gains. NOTE the units: kp is rad/s per unit of frame-fraction
+        # error (a BODY RATE), so kp IS the rate commanded at the frame edge.
         kp_xy = rospy.get_param('~pid_xy/kp', 0.15)
         ki_xy = rospy.get_param('~pid_xy/ki', 0.0)
         kd_xy = rospy.get_param('~pid_xy/kd', 0.0)
         i_max_xy = rospy.get_param('~pid_xy/i_max', 0.05)
         # The D term differentiates the detection, so it amplifies pixel
-        # jitter: one pixel of noise at 30 Hz is ~30 px/s. This EMA smooths
-        # it (1.0 = no filtering).
+        # jitter. This EMA smooths it (1.0 = no filtering).
         self.d_filter = rospy.get_param('~pid_xy/d_filter', 0.3)
 
         self.pid_x = Pid(kp_xy, ki_xy, kd_xy,
@@ -329,7 +337,11 @@ class IbvsController:
 
         # State machine timing / thresholds
         self.climb_settle_time = rospy.get_param('~climb_settle_time', 3.0)
-        self.align_tolerance = rospy.get_param('~align_tolerance', 0.15)
+        # Alignment is judged in real PIXELS, not frame-fractions: each axis'
+        # fraction is scaled back out by its own half-dimension so the test is
+        # a true (possibly non-square) pixel distance, e.g. "within 40 px of
+        # centre" regardless of image_width/image_height.
+        self.align_tolerance_px = rospy.get_param('~align_tolerance_px', 40.0)
         self.align_dwell_time = rospy.get_param('~align_dwell_time', 2.0)
         self.align_hysteresis = rospy.get_param('~align_hysteresis', 1.5)
         self.tag_timeout = rospy.get_param('~tag_timeout', 1.0)
@@ -452,29 +464,28 @@ class IbvsController:
         self.mode = msg.mode
 
     def target_callback(self, msg):
-        """Vision-module PIXEL POSITION -> pseudo target position in body FLU.
+        """Vision-module PIXEL POSITION -> lateral error, as a frame-fraction.
 
         point.x/point.y are where the detection sits in the image, in whole
-        pixels (positive right / positive down); point.z is ignored (there
-        is no range sensor). The error is formed HERE, against the aim point
-        (target_x, target_y) -- the image centre by default. Dividing that
-        pixel error by fx/fy gives the normalized offset, which the fixed
-        depth_guess scales into a body X-Y error for the centering loop; the
-        image_*_sign knobs map the image axes to the body frame for the down
-        (land) vs up (perch) camera.
+        pixels (positive right / positive down); point.z is ignored (there is
+        no range sensor). Each axis is normalized by its OWN half-dimension,
+        so the error is +-1.0 at that axis' frame edge -- independent of the
+        resolution, and symmetric between a 16:9 frame's wide and short
+        axes. The image_*_sign knobs map the image axes to the body frame for
+        the down (land) vs up (perch) camera.
 
         The derivative of the error is taken here, from consecutive
         detections and their real time delta, rather than in the control
         loop -- the detector is slower than control_rate, so differentiating
         per control tick would read zero between detections.
         """
-        # pixel error: how far the detection is from where we want it
-        offset_x = msg.point.x - self.target_x
-        offset_y = msg.point.y - self.target_y
+        half_w = self.image_width / 2.0
+        half_h = self.image_height / 2.0
+        norm_x = (msg.point.x - half_w) / half_w
+        norm_y = (msg.point.y - half_h) / half_h
 
-        depth = self.depth_guess
-        t_x = depth * self.image_x_sign * offset_x / self.fx
-        t_y = -depth * self.image_y_sign * offset_y / self.fy
+        t_x = self.image_x_sign * norm_x
+        t_y = -self.image_y_sign * norm_y
         now = rospy.Time.now()
 
         if self.t_x is not None and self.last_tag_time is not None:
@@ -586,16 +597,19 @@ class IbvsController:
 
         return ready_to_fly
 
-    def lateral_error(self):
-        """Distance of the tracked point from the aim point [m], in the body
-        frame, or None without a detection.
+    def lateral_error_px(self):
+        """Distance of the tracked point from the aim point, in real PIXELS,
+        or None without a detection.
 
-        t_x/t_y are already relative to the aim point (target_callback
-        subtracts it in pixels), so this is just their norm.
+        t_x/t_y are frame-fractions, so each is scaled back out by its own
+        half-dimension to recover a true pixel distance (the two axes have
+        different half-dimensions on a non-square frame).
         """
         if self.t_x is None:
             return None
-        return (self.t_x ** 2 + self.t_y ** 2) ** 0.5
+        err_x = (self.target_x - self.t_x) * (self.image_width / 2.0)
+        err_y = (self.target_y - self.t_y) * (self.image_height / 2.0)
+        return (err_x ** 2 + err_y ** 2) ** 0.5
 
     def compute_thrust(self):
         """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
@@ -608,8 +622,8 @@ class IbvsController:
         # Range is ignored; the safety pilot commits the final grab manually.
         if self.mission_mode == MODE_PERCH:
             if self.state in (ALIGN, ALIGNED):
-                lateral_error = self.lateral_error()
-                if lateral_error is not None and lateral_error <= self.descend_xy_gate:
+                lateral_error = self.lateral_error_px()
+                if lateral_error is not None and lateral_error <= self.descend_xy_gate_px:
                     return min(self.perch_climb_thrust, self.thrust_max)
             return self.hover_thrust
 
@@ -617,9 +631,9 @@ class IbvsController:
         # Descend ONLY while laterally centered -- descending off-center drops
         # the target out of the shrinking FOV (flight-tested funnel).
         if self.state in (ALIGN, ALIGNED):
-            lateral_error = self.lateral_error()
+            lateral_error = self.lateral_error_px()
             centered = (lateral_error is not None and
-                        lateral_error <= self.descend_xy_gate)
+                        lateral_error <= self.descend_xy_gate_px)
             if centered:
                 return max(self.land_descend_thrust, self.thrust_min)
             return self.hover_thrust
@@ -641,8 +655,8 @@ class IbvsController:
             self._land_ready_since = None
             return
 
-        lateral_error = self.lateral_error()
-        if lateral_error is None or lateral_error > self.descend_xy_gate:
+        lateral_error = self.lateral_error_px()
+        if lateral_error is None or lateral_error > self.descend_xy_gate_px:
             self._land_ready_since = None
             return
 
@@ -676,9 +690,9 @@ class IbvsController:
 
         The rate is computed purely from where the detection sits relative
         to the image centre -- nothing in this path reads the IMU, the AHRS
-        or any attitude estimate. The pixel offset is reconstructed into a
-        body-frame error in target_callback (fx/fy + depth_guess); here it
-        becomes a body rate directly:
+        or any attitude estimate. The pixel offset is normalized per axis to
+        a frame-fraction in target_callback; here it becomes a body rate
+        directly:
 
             body_rate = kp * error + kd * d(error)/dt      (clamped)
 
@@ -692,23 +706,25 @@ class IbvsController:
         if self.state not in (ALIGN, ALIGNED) or self.t_x is None:
             return 0.0, 0.0
 
-        # Target position error in body FLU. t_x/t_y are already measured
-        # from the aim point (target_callback subtracts target_x/target_y in
-        # pixels), so the desired body-frame offset is zero and the error is
-        # simply -t.
-        err_x = -self.t_x
-        err_y = -self.t_y
-        error_norm = (err_x ** 2 + err_y ** 2) ** 0.5
+        # Lateral error as a frame-fraction -- this is what drives the law.
+        err_x = self.target_x - self.t_x
+        err_y = self.target_y - self.t_y
+
+        # The ALIGN/ALIGNED test, however, is done in real PIXELS: scaling
+        # each frame-fraction back out by its own half-dimension recovers the
+        # true (possibly non-square) pixel distance, so the threshold means
+        # "within N px of the aim point" whatever the resolution.
+        error_norm_px = self.lateral_error_px()
 
         if self.state == ALIGN:
-            if error_norm < self.align_tolerance:
+            if error_norm_px < self.align_tolerance_px:
                 if self.aligned_since is None:
                     self.aligned_since = rospy.Time.now()
                 elif (rospy.Time.now() - self.aligned_since).to_sec() >= self.align_dwell_time:
                     self.transition(ALIGNED)
             else:
                 self.aligned_since = None
-        elif error_norm > self.align_tolerance * self.align_hysteresis:
+        elif error_norm_px > self.align_tolerance_px * self.align_hysteresis:
             self.transition(ALIGN)
 
         # We must fly TOWARD the tag. FLU sign conventions:

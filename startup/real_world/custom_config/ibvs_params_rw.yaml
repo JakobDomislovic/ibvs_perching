@@ -30,10 +30,10 @@ image_y_sign: 1.0
 # seizes GUIDED_NOGPS itself on a fresh target point; ibvs/start and
 # ibvs/stop work either way.
 # ---------------------------------------------------------------------------
-engage_on_target: true
-engage_needs_start: false     # false = the FIRST fresh target point while
-                              # armed engages (no ibvs/start needed);
-                              # true = ibvs/start first, NEXT point engages
+engage_on_target: true        # skip CLIMB and servo straight away once armed
+                              # and in GUIDED_NOGPS. The controller does NOT
+                              # switch the mode: the PILOT selects
+                              # GUIDED_NOGPS and ibvs/start enables servoing.
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
@@ -56,48 +56,50 @@ disarm_on_land: true
 land_disarm_height: 0.15      # [m] odometry altitude below which disarm triggers
 land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 
-depth_guess: 2.0              # [m] fixed scale from the normalized image offset
-                              # to the pseudo body error; sets the X-Y loop gain
-                              # together with pid_xy, never causes Z motion
-
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the target image error:
-#   desired_tilt = PID_xy(error), body_rate = kp_att * (tilt error)
+# X-Y axis -- direct law on the image error, NO attitude loop:
+#   body_rate = kp * error + kd * d(error)/dt        (clamped)
+# The error is the detection's offset from centre normalized per axis by its
+# own half-dimension, so it is +-1.0 at that axis' frame edge. No fx/fy, no
+# depth_guess, NO CAMERA CALIBRATION anywhere in the chain.
+# ~image_width / ~image_height come from the launch, not from here, so they
+# cannot drift from the resolution the detector actually reports.
 # ---------------------------------------------------------------------------
-# target_x / target_y -- the AIM POINT in the image, in PIXELS. Deliberately
-# NOT set here: the controller defaults them to cx/cy (the image centre,
-# passed from start_udp.sh via ibvs_udp.launch), which is what we want.
-# Setting them to 0 would aim at the TOP-LEFT CORNER of the frame, not the
-# centre. Set them only to bias the approach off-centre, or to 0 if the
-# detector already sends centre-relative values.
-descend_xy_gate: 0.25         # [m] descend/climb only while centered within this
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+descend_xy_gate_px: 60        # [px] descend/climb only while centred within this.
+                              # Kept LARGER than align_tolerance_px so ALIGNED
+                              # always implies the descent is allowed.
 
-max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
-kp_att: 1.5                   # body rate per rad of attitude error [1/s]
 max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s)
-kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]
-kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
 
 # ---------------------------------------------------------------------------
-# PID gains (flight-tested starting point, same as simulation). X-Y only --
-# the vertical axis is open-rate, there is no Z PID.
+# PID gains. UNITS CHANGED with the law: kp is rad/s per unit frame-fraction,
+# i.e. kp IS the rate commanded at the frame edge. NOT flight tested.
+#
+# Stability: the loop is third order (tilt integrates the rate command), and
+# with no attitude feedback the only x'' damping is aerodynamic drag c, so
+# Routh-Hurwitz needs  c * kd > kp.  At a representative c ~ 0.75 these values
+# give 0.75*0.60 = 0.45 > 0.25, a ~1.8x margin. Raising kp to 0.35 would put
+# full rate at the frame edge but cuts the margin to ~1.3x -- move kd up with
+# it if you do.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.10                    # desired tilt per meter of target error [rad/m]
-  ki: 0.0                     # [rad per m*s]
-  kd: 0.15                    # [rad per m/s] velocity damping -- keep > 0
-  i_max: 0.05                 # [rad] max integral contribution
+  kp: 0.25                    # [rad/s per unit] rate at the frame edge
+  ki: 0.0
+  kd: 0.60                    # [rad/s per unit/s] MUST stay > kp/drag
+  i_max: 0.05                 # max integral contribution
+  d_filter: 0.3               # EMA on the differentiated detection (1.0 = off)
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
-align_tolerance: 0.30         # [m] |error| below this counts as "aligned"
-                              # (doubled from 0.15: a bigger error still counts
-                              # as aligned, so ALIGNED latches more easily.
-                              # At fx=251/depth_guess=2.0 this is ~38 px of
-                              # image error; it also widens the ALIGNED exit
-                              # threshold to 0.45 m via align_hysteresis.)
+align_tolerance_px: 40        # [px] target must be within this many pixels of
+                              # the aim point to count as "aligned" -- the
+                              # doubled tolerance, now stated in pixels
+                              # directly (was 0.30 m at fx=251/depth 2.0).
+                              # Exits ALIGNED at 60 px via align_hysteresis.
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
-align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
+align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST

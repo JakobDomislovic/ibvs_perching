@@ -9,7 +9,7 @@ control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 # ---------------------------------------------------------------------------
 # Mission mode -- what the vertical axis does once centered on the target.
 #   land   down-facing camera, target below: descend onto it then DISARM.
-#          Uses the range hint (point.z) as height above the target.
+#          Open-rate descent; the terminal disarm uses odometry altitude.
 #   perch  up-facing camera, branch above: climb toward it while centered.
 #          Range is ignored; the safety pilot commits the final grab.
 # Override per run from the launch (mission_mode:=perch).
@@ -43,14 +43,12 @@ land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 
 # ---------------------------------------------------------------------------
 # Mid-flight engagement (fly manually with the keyboard joystick, then let
-# IBVS take over). engage_on_target lets the controller seize GUIDED_NOGPS
-# itself on a fresh ibvs/target_point; engage_needs_start gates that behind
-# an ibvs/start call first ('i' on the keyboard joystick, a real joystick
-# button later) so seeing the tag alone never grabs control. The classic
-# service mission (ibvs/takeoff -> ibvs/start) is unaffected.
+# IBVS take over). engage_on_target lets the controller skip CLIMB and servo
+# straight away once it is armed and in GUIDED_NOGPS. It does NOT switch the
+# mode: the PILOT selects GUIDED_NOGPS, and ibvs/start enables servoing.
+# The classic service mission (ibvs/takeoff -> ibvs/start) is unaffected.
 # ---------------------------------------------------------------------------
 engage_on_target: true
-engage_needs_start: true
 
 # ---------------------------------------------------------------------------
 # Z axis -- climb rate through the AttitudeTarget "thrust" field.
@@ -68,63 +66,52 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] CLIMB ends when odometry z reaches this
 
-depth_guess: 2.0              # [m] fixed scale from the normalized image offset
-                              # to the pseudo body error; sets the X-Y loop gain
-                              # together with pid_xy, never causes Z motion
-
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the tag position error
-# (expressed in the body FLU frame: x-forward, y-left, z-up):
-#   desired_tilt = PID_xy(tag error)                  (clamped to max_tilt)
-#   body_rate    = kp_att * (desired_tilt - current_tilt)
-# A raw rate command proportional to position error is UNSTABLE (the rate
-# integrates into an unbounded tilt); the attitude inner loop is required.
+# X-Y axis -- direct law on the image error, NO attitude loop:
+#   body_rate = kp * error + kd * d(error)/dt        (clamped)
+# The error is the detection's offset from centre, normalized per axis by its
+# own half-dimension, so it is +-1.0 at that axis' frame edge. No fx/fy, no
+# depth_guess, NO CAMERA CALIBRATION anywhere in the chain.
+# ~image_width / ~image_height come from ibvs_perching.launch (640x480 for the
+# sim camera) so they cannot drift from the resolution the detector reports.
 # ---------------------------------------------------------------------------
-# target_x / target_y -- the AIM POINT in the image, in PIXELS. Not set
-# here: the controller defaults them to cx/cy (the image centre). Setting
-# them to 0 would aim at the TOP-LEFT CORNER of the frame, not the centre.
-# NOTE this file is the SIM config, and the sim vision modules
-# (aruco_detector.py / mock_ar_tag_publisher.py) still publish NORMALIZED
-# offsets rather than pixel positions -- the sim path needs converting
-# before it matches the controller (see cx/cy below).
-cx: 320.0                     # [px] sim camera is 640x480 -> centre 320,240
-cy: 240.0
-descend_xy_gate: 0.25         # [m] descend only while centered within this radius
-                              # (keeps the tag inside the shrinking camera FOV)
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+descend_xy_gate_px: 60        # [px] descend only while centred within this radius
+                              # (keeps the tag inside the shrinking camera FOV).
+                              # Kept LARGER than align_tolerance_px so ALIGNED
+                              # always implies the descent is allowed.
 
-max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
-kp_att: 1.5                   # body rate per rad of attitude error [1/s]
 max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s)
-kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]; HOVER and
-                              # TAG_LOST hold the latched spot (takeoff point /
-                              # wherever servoing stopped) -- level attitude
-                              # alone drifts away on attitude trim bias
-kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
 
 # ---------------------------------------------------------------------------
-# PID gains. I and D start at 0 (pure P) -- raise them only when tuning.
-# The D-term uses body velocity from odometry (equivalent to velocity
-# damping; kd_xy ~ 0.25 was flight-tested and smooths the approach).
+# PID gains. UNITS: kp is rad/s per unit frame-fraction, i.e. kp IS the rate
+# commanded at the frame edge. The D term differentiates the DETECTION (there
+# is no odometry velocity in the real-world setup).
+#
+# Stability: the loop is third order (tilt integrates the rate command), and
+# with no attitude feedback the only x'' damping is aerodynamic drag c, so
+# Routh-Hurwitz needs  c * kd > kp.  At a representative c ~ 0.75 these give
+# 0.75*0.60 = 0.45 > 0.25, a ~1.8x margin. kd MUST stay non-zero.
 # i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.15                    # desired tilt per meter of tag error [rad/m]
-  ki: 0.002                   # [rad per m*s]
-  kd: 0.15                    # [rad per m/s] -- NEEDED while descending/climbing:
-                              # with kd 0 the undamped X-Y oscillation outruns
-                              # the shrinking FOV and the tag leaves the frame
-  i_max: 0.05                 # [rad] max integral contribution
+  kp: 0.25                    # [rad/s per unit] rate at the frame edge
+  ki: 0.0
+  kd: 0.60                    # [rad/s per unit/s] MUST stay > kp/drag
+  i_max: 0.05                 # max integral contribution
+  d_filter: 0.3               # EMA on the differentiated detection (1.0 = off)
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback timeout if takeoff_height is never reached
-align_tolerance: 0.30         # [m] |error| below this counts as "aligned"
-                              # (doubled from 0.15 so a bigger error still
-                              # counts as aligned; widens the ALIGNED exit
-                              # threshold to 0.45 m via align_hysteresis)
+align_tolerance_px: 40        # [px] target must be within this many pixels of
+                              # the aim point to count as "aligned" -- the
+                              # doubled tolerance, stated in pixels directly.
+                              # Exits ALIGNED at 60 px via align_hysteresis.
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
-align_hysteresis: 1.5         # multiplies align_tolerance to leave ALIGNED
+align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no tag message within this time -> TAG_LOST
                               # (short: at 30 fps detection, 0.5 s of silence is
                               # a real loss, and stale-data descent near the
