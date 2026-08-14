@@ -363,7 +363,16 @@ class IbvsController:
         # which meant simply arming on the bench (with the tag in view)
         # threw the vehicle into GUIDED_NOGPS instantly. The mode is the
         # pilot's, and only the explicit ibvs/takeoff service may change it.
+        #
+        # Seeing a target point does still ENABLE SERVOING (engage_armed),
+        # so no button press is needed -- but that only decides what the
+        # controller does ONCE THE PILOT has selected GUIDED_NOGPS. Both
+        # gates must hold to leave WAIT_ARM, and the mode gate is the
+        # pilot's alone. ibvs/stop clears engage_armed so a tag in view
+        # cannot re-enable servoing behind the pilot's back; ibvs/start
+        # re-arms it.
         self.engage_on_target = rospy.get_param('~engage_on_target', False)
+        self.engage_armed = self.engage_on_target
 
 
         self.state = WAIT_ARM
@@ -450,12 +459,16 @@ class IbvsController:
         self.servo_active = True
         self.landed = False
         self._land_ready_since = None
+        self.engage_armed = self.engage_on_target
         rospy.loginfo("ibvs_controller: servoing STARTED (ibvs/start) -- "
                       "flip the RC mode switch to GUIDED_NOGPS to engage")
         return TriggerResponse(success=True, message="IBVS servoing started")
 
     def handle_stop(self, _req):
         self.servo_active = False
+        # a target point must not silently re-enable servoing after an
+        # explicit stop -- ibvs/start re-arms that
+        self.engage_armed = False
         rospy.loginfo("ibvs_controller: servoing STOPPED (ibvs/stop)")
         return TriggerResponse(success=True, message="IBVS servoing stopped, holding position")
 
@@ -499,9 +512,15 @@ class IbvsController:
         self.t_y = t_y
         self.last_tag_time = now
 
-        # NOTE: seeing a target point does NOT engage anything. The FCU mode
-        # belongs to the safety pilot; the controller only ever acts once
-        # mavros/state reports armed + GUIDED_NOGPS (see update_state_machine).
+        # A target point ENABLES SERVOING, but never touches the FCU mode --
+        # that belongs to the safety pilot. The controller still only acts
+        # once mavros/state reports armed + GUIDED_NOGPS, which the pilot
+        # selects on the RC switch (see update_state_machine).
+        if self.engage_armed and self.armed and not self.servo_active:
+            self.servo_active = True
+            rospy.loginfo("ibvs_controller: target point while armed -> "
+                          "servoing ENABLED (waiting for the pilot to select "
+                          "GUIDED_NOGPS; mode NOT touched)")
 
     def odom_callback(self, msg):
         self.last_odom = msg
