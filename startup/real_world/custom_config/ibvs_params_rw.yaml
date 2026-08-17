@@ -19,11 +19,17 @@
 # ---------------------------------------------------------------------------
 mission_mode: land
 
-# Image->body sign per axis (absorb the camera flip + detector pixel-sign
-# convention). Defaults suit the down-facing landing camera; the up-facing
-# perch camera typically needs one or both at -1.0 -- VERIFY before flying.
-image_x_sign: 1.0
-image_y_sign: 1.0
+# Image->body sign per axis. The vision interface the controller ASSUMES is
+# point.x positive RIGHT, point.y positive DOWN (the usual top-left-origin
+# image convention). The PiOS detector does NOT use that: its frame has
+# x positive LEFT and y positive UP, so BOTH axes are inverted relative to
+# the assumption and both signs are -1.0.
+#
+# These knobs mirror the ERROR about the image centre; they never move the
+# aim point, so a detection dead centre stays zero-error whatever they are.
+# Set them so a target off to one side produces a correction TOWARD it.
+image_x_sign: -1.0            # PiOS x is positive LEFT  (assumed RIGHT)
+image_y_sign: -1.0            # PiOS y is positive UP    (assumed DOWN)
 
 # ---------------------------------------------------------------------------
 # Engagement (real world): nothing is primed at startup. The controller
