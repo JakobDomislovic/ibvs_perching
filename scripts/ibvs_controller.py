@@ -795,8 +795,8 @@ class IbvsController:
         #   +roll  rate = right down = -y accel -> roll error = target_y - tag_y
         # The D term opposes the error's rate of change (t_*_dot is the
         # differentiated detection; d(err_x)/dt = +d(t_x)/dt with these signs).
-        pitch_rate = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
-        roll_rate = self.pid_y.update(err_y, -self.t_y_dot, self.dt)
+        roll_rate = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
+        pitch_rate = self.pid_y.update(err_y, -self.t_y_dot, self.dt)
 
         return (clamp(roll_rate, -self.max_body_rate, self.max_body_rate),
                 clamp(pitch_rate, -self.max_body_rate, self.max_body_rate))
@@ -813,10 +813,10 @@ class IbvsController:
         msg = AttitudeTarget()
         msg.header.stamp = rospy.Time.now()
         msg.type_mask = AttitudeTarget.IGNORE_ATTITUDE
-        #msg.body_rate.x = roll_rate
-        #msg.body_rate.y = pitch_rate
-        msg.body_rate.x = -1 * pitch_rate
-        msg.body_rate.y =  roll_rate
+        msg.body_rate.x = roll_rate
+        msg.body_rate.y = pitch_rate
+        #msg.body_rate.x = -1 * pitch_rate
+        #msg.body_rate.y =  -1 * roll_rate
 
         msg.body_rate.z = 0.0
         msg.thrust = 0.5 #thrust #samo za probu
