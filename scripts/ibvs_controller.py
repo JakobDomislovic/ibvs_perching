@@ -329,6 +329,11 @@ class IbvsController:
         # The D term differentiates the detection, so it amplifies pixel
         # jitter. This EMA smooths it (1.0 = no filtering).
         self.d_filter = rospy.get_param('~pid_xy/d_filter', 0.3)
+        # Longest detection gap still worth differentiating [s]. Beyond this
+        # the derivative is zeroed rather than computed across the gap: a
+        # slow or stuttering detector otherwise makes the D term, not the
+        # position error, the thing steering the aircraft.
+        self.d_max_dt = rospy.get_param('~pid_xy/d_max_dt', 0.15)
 
         self.pid_x = Pid(kp_xy, ki_xy, kd_xy,
                          -self.max_body_rate, self.max_body_rate, i_max_xy)
@@ -503,7 +508,19 @@ class IbvsController:
 
         if self.t_x is not None and self.last_tag_time is not None:
             dt = (now - self.last_tag_time).to_sec()
-            if dt > 1e-3:
+            if dt > self.d_max_dt:
+                # Detection gap too large to differentiate: (t_x - prev)/dt
+                # across a gap is not a velocity, it is the tag having moved
+                # (or the vehicle having flown) while we were blind. Dividing
+                # a large jump by a large dt still yields a big number, and
+                # with kd it dominates the command -- flight-tested on
+                # 2026-08-17-09-37-31.bag, where a 1.8 Hz detector left the
+                # D term at ~63% of the commanded rate and pegged it at the
+                # clamp for 0.3 s while the error was still 130 px. Decay to
+                # zero instead and let P do the work.
+                self.t_x_dot = 0.0
+                self.t_y_dot = 0.0
+            elif dt > 1e-3:
                 a = self.d_filter
                 self.t_x_dot = (1.0 - a) * self.t_x_dot + a * (t_x - self.t_x) / dt
                 self.t_y_dot = (1.0 - a) * self.t_y_dot + a * (t_y - self.t_y) / dt
@@ -772,7 +789,7 @@ class IbvsController:
         msg.body_rate.x = roll_rate
         msg.body_rate.y = pitch_rate
         msg.body_rate.z = 0.0
-        msg.thrust = thrust #samo za probu
+        msg.thrust = 0.5 #thrust #samo za probu
         self.setpoint_pub.publish(msg)
 
 

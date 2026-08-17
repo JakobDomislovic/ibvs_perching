@@ -4,16 +4,8 @@ startup_window: ibvs
 # All settings come from start_udp.sh (fcu_url, mission_mode, namespace,
 # bind_port, cx/cy/fx/fy) -- DO NOT edit them here, edit start_udp.sh.
 pre_window: export UAV_NAMESPACE=<%= @settings["namespace"] %> && source ./shell_helpers.sh
-# ---------------------------------------------------------------------------
-# CONSOLIDATED real-world session: the whole stack + UDP receiver + IBVS in
-# one command (start_udp.sh). Off-board detection over UDP -- NO on-board
-# ArUco (no cv2/numpy), NO RealSense, NO uav_ros_stack, NO OptiTrack.
-#
-# Lean on purpose (RAM): the old session.yml pulled in aruco_detector
-# (~120 MB cv2+numpy) and 6 rostopic-echo monitors (~37 MB each). This one
-# runs only what flies: roscore, mavros, udp_target_receiver, ibvs_controller,
-# and a single state monitor. rc_to_joy is not needed either.
-# ---------------------------------------------------------------------------
+
+
 windows:
   - stack:
       layout: tiled
@@ -26,6 +18,7 @@ windows:
         - waitForRos; waitForMavros; waitForParams;
           setParam GUID_OPTIONS 0;
           rosrun mavros mavsys -n $UAV_NAMESPACE/mavros rate --all 50
+        - waitForRos; rosbag record -a
   - ibvs:
       layout: tiled
       panes:
