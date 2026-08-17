@@ -57,14 +57,12 @@ Control split:
          perch_climb_thrust (> 0.5, climb) in perch mode; off-center or in
          any hold state it is hover_thrust. Landing then disarms on odometry
          altitude (land_disarm_height); perching is finished by the pilot.
-  - X-Y: closed-loop IBVS as a CASCADE. The setpoint still comes ONLY from
-         the detection's offset from the image centre (normalized per axis
-         to a frame-fraction, +-1.0 at that axis' frame edge, NO camera
-         calibration anywhere), but that offset now commands a TILT, and a
-         second inner loop tracks it against the measured attitude:
+  - X-Y: closed-loop IBVS. The setpoint comes ONLY from the detection's
+         offset from the image centre (normalized per axis to a
+         frame-fraction, +-1.0 at that axis' frame edge, NO camera
+         calibration anywhere), and that offset commands a TILT:
 
              desired_tilt = PID_xy(image error)      (clamped to max_tilt)
-             body_rate    = kp_att * (desired_tilt - current_tilt)
 
          kp is therefore the TILT commanded at the frame edge (rad), not a
          rate. Normalizing each axis by its own half-dimension keeps a 16:9
@@ -72,14 +70,24 @@ Control split:
          640 px against the short axis' 360 px, so only the wide one could
          saturate (bench tested: pitch pegged while roll topped out at 0.29).
 
-         ATTITUDE comes from mavros/imu/data -- the FCU's own AHRS estimate,
-         which needs NO position solution, so it is available with no GPS and
-         no OptiTrack. (mavros/local_position/odom is not usable here: it
-         requires an EKF POSITION fix and simply never publishes in this
+         HOW THE TILT IS SENT is ~command_mode:
+           attitude (default) -- publish the target ATTITUDE quaternion and
+             let ArduPilot close the attitude loop: 400 Hz, tuned ATC_*
+             gains, feedforward. Nothing about the tilt loop runs in Python.
+           rate -- publish a body rate from our own inner loop,
+             body_rate = kp_att * (desired_tilt - current_tilt), the previous
+             behaviour, kept for bench comparison.
+
+         ATTITUDE FEEDBACK comes from mavros/imu/data -- the FCU's own AHRS
+         estimate, which needs NO position solution, so it is available with
+         no GPS and no OptiTrack. In attitude mode it is needed only for the
+         YAW to put in the quaternion (see publish_setpoint); in rate mode it
+         closes the tilt loop. (mavros/local_position/odom is not usable for
+         either: it requires an EKF POSITION fix and never publishes in this
          setup. It is still read, but only for ALTITUDE -- takeoff_height and
          the landing disarm.)
 
-         WHY THE INNER LOOP MATTERS -- this is the overshoot fix. A bare
+         WHY COMMANDING A TILT AT ALL -- this is the overshoot fix. A bare
          "rate = kp * error" law leaves tilt as the free INTEGRAL of the
          error: nothing ever commands tilt back toward level, so the vehicle
          reaches the target still tilted and flies straight past it. Only a
@@ -88,29 +96,32 @@ Control split:
          whose only x'' damping was aerodynamic drag c, needing c*kd > kp to
          be stable at all -- a knife edge that was flight tested BOTH ways
          (no D term flipped the vehicle; with D it still would not settle).
-         The cascade removes that failure mode structurally: desired_tilt is
-         BOUNDED by max_tilt and decays to 0 as the error shrinks, and the
-         inner loop actively commands the OPPOSITE rate to pull the built-up
-         tilt back. kd is no longer a CRASH risk at 0 (the loop stays
-         bounded) but it is still needed to settle rather than oscillate.
+         Commanding a TILT removes that failure mode structurally:
+         desired_tilt is BOUNDED by max_tilt and decays to 0 as the error
+         shrinks. kd is no longer a CRASH risk at 0, but it still damps.
 
-         GAINS ARE LIMITED BY DETECTION RATE, not by the plant. The D term is
-         computed from consecutive detections, so a slow detector both delays
-         the P term and blunts the D term. MEASURED on the 2026-08-17 bags:
-         3.8-5.9 Hz mean, median inter-arrival gap 0.157 s, ~2% of gaps are
-         multi-second stalls. Simulated against that gap distribution,
-         peak overshoot in frame-widths / settling time:
-             kp .06 kd .12   0.095 / 11s     <-- real-world config
-             kp .10 kd .15   0.404 / 29s
-             kp .15 kd .20   1.858 / never
-         Raising the detection rate is still the best available improvement;
-         at 10 Hz+ the same gains settle in ~8 s with no overshoot.
+         WHY ki IS NON-ZERO -- flight evidence, 2026-08-17-18-30-59.bag. A
+         pure-P outer loop cannot hold station against a STEADY disturbance
+         (wind, AHRS trim): it needs a standing error big enough to generate
+         the balancing tilt, err_ss = (a_dist / g) / kp. At the kp of 0.06
+         that bag flew, a modest 0.3 m/s^2 of drift needs HALF THE FRAME of
+         standing error -- and that is exactly what the bag shows, the error
+         growing to 0.42/-0.59 of the frame over each engagement and staying
+         there. It was not diverging; it was sitting at the offset pure P
+         implies. ki trims that out (i_max bounds it to ~0.5 m/s^2 worth).
+
+         GAINS ARE ALSO LIMITED BY DETECTION RATE. The D term is computed
+         from consecutive detections, so a slow detector both delays the P
+         term and blunts the D term. MEASURED across the 2026-08-17 bags:
+         3.8-5.9 Hz, median inter-arrival gap 0.157-0.164 s, ~1-2% of gaps
+         are multi-second stalls. Raising the detection rate is still the
+         single best available improvement.
 
          MIND ~pid_xy/d_max_dt: it must stay comfortably ABOVE the actual
          detection gap. It shipped at 0.15 s against a measured MEDIAN gap of
-         0.157 s, so the D term was discarded on ~80% of detections and kd
-         was very nearly inert (simulated overshoot 0.369, versus 0.394 for
-         pure P). Sized at ~2.5x the median gap it works as intended.
+         0.157 s -- in 2026-08-17-18-30-59.bag, 92% of gaps exceeded it, so
+         the D term was discarded on 92% of detections and kd was very nearly
+         inert. At 0.40 s only 1% of that bag's gaps exceed it.
 
          All in the body FLU convention (mavros converts FLU->FRD for
          MAVLink). Sign conventions (FLU, ROS euler): +pitch = nose down =
@@ -204,6 +215,8 @@ Thrust ("climb rate") per state:
     TAG_LOST  hover_thrust (hold altitude, wait for re-detection)
 """
 
+import math
+
 import rospy
 import tf.transformations as tft
 from geometry_msgs.msg import PointStamped
@@ -233,6 +246,16 @@ TAG_LOST = 'TAG_LOST'
 #              pilot takes over manually once the vehicle is at the branch.
 MODE_LAND = 'land'
 MODE_PERCH = 'perch'
+
+# How the desired tilt reaches the FCU (~command_mode).
+#   CMD_ATTITUDE  send the target ATTITUDE (quaternion) and let ArduPilot's
+#                 own attitude controller close the loop -- 400 Hz, tuned
+#                 ATC_* gains. The default, and the point of this version.
+#   CMD_RATE      send a body RATE from our own kp_att inner loop, the
+#                 previous behaviour. Kept for bench A/B comparison, and used
+#                 automatically until the first IMU message arrives.
+CMD_ATTITUDE = 'attitude'
+CMD_RATE = 'rate'
 
 
 def clamp(value, low, high):
@@ -330,16 +353,22 @@ class IbvsController:
         # report ALIGNED and still refuse to descend.
         self.descend_xy_gate_px = rospy.get_param('~descend_xy_gate_px', 60.0)
 
-        # X-Y axis (CASCADE: image error -> desired tilt -> body rate).
+        # X-Y axis. The outer (image -> desired tilt) loop is always ours;
+        # ~command_mode decides who closes the ATTITUDE loop. See CMD_* above.
+        self.command_mode = rospy.get_param('~command_mode', CMD_ATTITUDE)
+        if self.command_mode not in (CMD_ATTITUDE, CMD_RATE):
+            rospy.logwarn("ibvs_controller: unknown command_mode '%s', "
+                          "falling back to '%s'", self.command_mode, CMD_ATTITUDE)
+            self.command_mode = CMD_ATTITUDE
         # max_tilt bounds the OUTER loop's output, and is the single most
         # important safety limit here: the vehicle can never be commanded to
         # a steeper attitude than this, however large the pixel error.
         self.max_tilt = rospy.get_param('~max_tilt', 0.15)
-        # Inner attitude loop: body rate commanded per rad of tilt error.
+        # RATE mode only -- inner loop gain and its rate clamp. Unused in
+        # attitude mode, where ArduPilot's ATC_* gains do this job. Keep
+        # max_body_rate >= kp_att * max_tilt or that inner loop saturates
+        # before it can track a full-scale tilt command.
         self.kp_att = rospy.get_param('~kp_att', 1.5)
-        # Keep max_body_rate >= kp_att * max_tilt, or the inner loop saturates
-        # before it can ever track a full-scale tilt command and the cascade
-        # goes nonlinear right where it needs authority most.
         self.max_body_rate = rospy.get_param('~max_body_rate', 0.35)
 
         # Camera RESOLUTION -- the only camera knowledge the controller needs.
@@ -456,6 +485,10 @@ class IbvsController:
         # here). last_odom is still kept, but ONLY for altitude.
         self.last_imu = None
         self.last_odom = None
+        # Yaw commanded in attitude mode: latched from the IMU on entering
+        # ALIGN so the vehicle holds the heading it engaged at. None means
+        # "track the current yaw", i.e. never ask for a yaw change.
+        self.yaw_setpoint = None
 
         self.setpoint_pub = rospy.Publisher(
             'mavros/setpoint_raw/attitude', AttitudeTarget, queue_size=1)
@@ -645,6 +678,16 @@ class IbvsController:
                 # TAG_LOST would otherwise show up as a huge d(error)/dt
                 self.t_x_dot = 0.0
                 self.t_y_dot = 0.0
+                # Latch the heading to hold for the whole approach (attitude
+                # mode commands a quaternion, which must carry SOME yaw).
+                att = self.current_attitude()
+                self.yaw_setpoint = att[2] if att is not None else None
+                if self.yaw_setpoint is not None:
+                    rospy.loginfo("ibvs_controller: holding yaw %.1f deg for "
+                                  "this approach", math.degrees(self.yaw_setpoint))
+            elif new_state not in (ALIGN, ALIGNED):
+                # not servoing: follow the current heading, never command a change
+                self.yaw_setpoint = None
             self.state = new_state
             self.state_entered_at = rospy.Time.now()
             if new_state != ALIGN:
@@ -820,32 +863,25 @@ class IbvsController:
         except rospy.ServiceException as exc:
             rospy.logerr("ibvs_controller: disarm failed: %s", exc)
 
-    def compute_body_rates(self):
-        """Cascade: image error -> desired TILT -> body rate.
-
-        Two stages:
+    def compute_desired_tilt(self):
+        """Outer IBVS loop: image error -> desired (roll, pitch) in rad.
 
             desired_tilt = PID_xy(image error)       (clamped to max_tilt)
-            body_rate    = kp_att * (desired_tilt - current_tilt)
 
-        The outer stage is pure IBVS, unchanged: the setpoint comes only from
-        where the detection sits in the image, no calibration, no depth. The
-        inner stage closes on the IMU's AHRS attitude, and is what makes the
-        approach SETTLE instead of overshoot -- as the error shrinks,
-        desired_tilt shrinks with it, and the inner loop then commands the
-        OPPOSITE rate to pull the accumulated tilt back toward level. The
-        bare rate law this replaces had nothing that could do that.
+        Pure IBVS: the setpoint comes only from where the detection sits in
+        the image -- no calibration, no depth, no attitude feedback in THIS
+        stage. How the tilt is then delivered to the FCU is publish_setpoint's
+        job and depends on ~command_mode (attitude target, or a body rate via
+        the kp_att inner loop).
 
-        Outside ALIGN/ALIGNED there is no detection to servo on, so
-        desired_tilt stays 0 -- LEVEL FLIGHT, actively commanded. That is
-        NOT the same as returning a zero body rate: with IGNORE_ATTITUDE a
-        zero rate means "keep the current tilt", which is what used to let
-        the vehicle fly away after a TAG_LOST.
+        Outside ALIGN/ALIGNED there is no detection to servo on, so the
+        desired tilt is 0 -- LEVEL FLIGHT, actively commanded. Note this is
+        NOT the same as commanding a zero body RATE, which under
+        IGNORE_ATTITUDE means "hold the current tilt" and is what used to let
+        the vehicle keep flying away after a TAG_LOST.
         """
-        att = self.current_attitude()
-
-        # Outer loop. Runs (and drives the ALIGN/ALIGNED transitions) only
-        # while servoing on a live detection; every other state wants level.
+        # Runs (and drives the ALIGN/ALIGNED transitions) only while servoing
+        # on a live detection; every other state wants level.
         desired_roll = 0.0
         desired_pitch = 0.0
         if self.state in (ALIGN, ALIGNED) and self.t_x is not None:
@@ -880,15 +916,18 @@ class IbvsController:
             desired_roll = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
             desired_pitch = self.pid_y.update(err_y, -self.t_y_dot, self.dt)
 
-        # Inner loop needs a real attitude measurement; without one the only
-        # safe command is no rotation at all.
+        return desired_roll, desired_pitch
+
+    def tilt_to_body_rates(self, desired_roll, desired_pitch, att):
+        """RATE mode inner loop: kp_att * (desired_tilt - measured_tilt).
+
+        Only used when ~command_mode is 'rate'. In 'attitude' mode ArduPilot
+        runs this loop itself, at 400 Hz with its own tuned gains, so this
+        hand-rolled 30 Hz version is not in the path at all.
+        """
         if att is None:
-            rospy.logwarn_throttle(
-                5.0, "ibvs_controller: no mavros/imu/data yet -- commanding "
-                     "zero body rates (attitude loop cannot close)")
             return 0.0, 0.0
         roll, pitch, _yaw = att
-
         roll_rate = clamp(self.kp_att * (desired_roll - roll),
                           -self.max_body_rate, self.max_body_rate)
         pitch_rate = clamp(self.kp_att * (desired_pitch - pitch),
@@ -898,18 +937,64 @@ class IbvsController:
     def control_loop(self, _event):
         self.update_state_machine()
         thrust = self.compute_thrust()
-        roll_rate, pitch_rate = self.compute_body_rates()
-        self.publish_setpoint(roll_rate, pitch_rate, thrust)
+        desired_roll, desired_pitch = self.compute_desired_tilt()
+        self.publish_setpoint(desired_roll, desired_pitch, thrust)
         if self.mission_mode == MODE_LAND:
             self.maybe_land_disarm()
 
-    def publish_setpoint(self, roll_rate, pitch_rate, thrust):
+    def publish_setpoint(self, desired_roll, desired_pitch, thrust):
+        """Send the desired tilt to the FCU, as an ANGLE or as a body RATE.
+
+        ATTITUDE mode (~command_mode: attitude, the default) hands the target
+        attitude straight to ArduPilot and lets its own attitude controller
+        close the loop -- 400 Hz, tuned ATC_* gains, proper feedforward --
+        instead of our 30 Hz kp_att P-loop fed by a ~50 Hz IMU topic.
+        type_mask ignores the three RATE fields so the quaternion is what
+        gets used.
+
+        The quaternion must be NON-ZERO: Copter-Larics-4.3.3's guided mode
+        treats an all-zero attitude quaternion as "use body rates" (it routes
+        to input_rate_bf_roll_pitch_yaw, see README section 2), so a
+        zero-filled orientation would silently select rate control.
+
+        YAW: a quaternion always carries a yaw, and we do not servo yaw. The
+        commanded yaw is therefore yaw_setpoint -- latched from the IMU when
+        ALIGN is entered, so the vehicle HOLDS the heading it engaged at
+        rather than swinging to north (which yaw=0 would command). Outside
+        ALIGN/ALIGNED it tracks the current yaw, i.e. never asks for a change.
+
+        RATE mode (~command_mode: rate) is the previous behaviour, kept so the
+        two can be compared on the bench without a rebuild. It is also the
+        automatic fallback before the first IMU message, since without an
+        attitude estimate there is no safe yaw to put in the quaternion.
+        """
         msg = AttitudeTarget()
         msg.header.stamp = rospy.Time.now()
-        msg.type_mask = AttitudeTarget.IGNORE_ATTITUDE
-        msg.body_rate.x = roll_rate
-        msg.body_rate.y = pitch_rate
-        msg.body_rate.z = 0.0
+        att = self.current_attitude()
+
+        if self.command_mode == CMD_ATTITUDE and att is not None:
+            yaw = self.yaw_setpoint if self.yaw_setpoint is not None else att[2]
+            q = tft.quaternion_from_euler(desired_roll, desired_pitch, yaw)
+            msg.type_mask = (AttitudeTarget.IGNORE_ROLL_RATE |
+                             AttitudeTarget.IGNORE_PITCH_RATE |
+                             AttitudeTarget.IGNORE_YAW_RATE)
+            msg.orientation.x = q[0]
+            msg.orientation.y = q[1]
+            msg.orientation.z = q[2]
+            msg.orientation.w = q[3]
+        else:
+            if self.command_mode == CMD_ATTITUDE:
+                rospy.logwarn_throttle(
+                    5.0, "ibvs_controller: no mavros/imu/data yet -- cannot "
+                         "build an attitude target (yaw unknown), falling back "
+                         "to zero body rates")
+            roll_rate, pitch_rate = self.tilt_to_body_rates(
+                desired_roll, desired_pitch, att)
+            msg.type_mask = AttitudeTarget.IGNORE_ATTITUDE
+            msg.body_rate.x = roll_rate
+            msg.body_rate.y = pitch_rate
+            msg.body_rate.z = 0.0
+
         msg.thrust = thrust
         self.setpoint_pub.publish(msg)
 

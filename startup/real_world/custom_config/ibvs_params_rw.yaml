@@ -84,10 +84,20 @@ descend_xy_gate_px: 60        # [px] descend/climb only while centred within thi
                               # Kept LARGER than align_tolerance_px so ALIGNED
                               # always implies the descent is allowed.
 
+# How the desired tilt is sent to the FCU:
+#   attitude  publish the target ATTITUDE quaternion and let ArduPilot close
+#             the attitude loop (400 Hz, tuned ATC_* gains). Requires sane
+#             ATC_ANG_RLL_P / ATC_ANG_PIT_P on the vehicle.
+#   rate      publish a body rate from our own kp_att loop (previous
+#             behaviour). Switch to this to A/B the two on the bench.
+command_mode: attitude
+
 max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg). THE key
                               # safety limit: the vehicle can never be
                               # commanded steeper than this, however big the
-                              # pixel error gets.
+                              # pixel error gets. Applies in BOTH modes.
+
+# RATE mode only (ignored when command_mode is 'attitude').
 kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
 max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s).
                               # Keep >= kp_att * max_tilt (= 0.225 here) or the
@@ -99,36 +109,50 @@ max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/
 # kp IS the tilt commanded at the frame edge (kp 0.06 => 3.4 deg there). This
 # is a TILT, not a rate; the inner attitude loop turns it into one.
 #
-# THESE ARE DELIBERATELY GENTLE, and the limit is DETECTION RATE, not the
-# plant. MEASURED on ibvs/target_point across the 2026-08-17 bags: mean
-# 3.8-5.9 Hz, median inter-arrival gap 0.157 s, p90 0.182 s, with ~2% of gaps
-# being multi-second stalls. (An earlier comment here claimed 1.8 Hz, from a
-# single early-morning bag; the real figure is ~3x better than that.)
+# RETUNED against 2026-08-17-18-30-59.bag, the first bag that engaged. It shows
+# kp 0.06 commanding only ~1 deg of tilt while the error GREW to 0.42/-0.59 of
+# the frame and stayed there, across all three engagement windows.
 #
-# Simulated against this cascade with that measured gap distribution
-# (drag c=0.75, 30 Hz control, start near the frame edge), 25 seeds:
+# That is not divergence, it is the steady-state error a pure-P outer loop
+# MUST have against a constant disturbance (wind, AHRS trim):
 #
-#     config                       overshoot   settle
-#     kp .06 kd .12  d_max_dt .40      0.095      11s   <-- this file
-#     kp .10 kd .15  d_max_dt .40      0.404      29s
-#     kp .15 kd .20  d_max_dt .40      1.858    never
+#     err_ss = (a_dist / g) / kp        frame-fractions
 #
-# kp 0.15 overshoots by nearly two frame widths at this detection rate -- it
-# loses the target completely, which is what "it just went somewhere" looks
-# like. Raising the detection rate is still the highest-value change
-# available; at 10 Hz+ these gains settle in ~8 s with no overshoot.
+#     kp      0.15 m/s2   0.30 m/s2   0.50 m/s2
+#     0.06         0.25        0.51        0.85     <-- what that bag flew
+#     0.12         0.13        0.25        0.42
+#     0.20         0.08        0.15        0.25
+#
+# At kp 0.06, 0.3 m/s^2 of drift needs HALF THE FRAME of standing error, which
+# is what the bag recorded. Two fixes, both applied: raise kp, and give the
+# loop an INTEGRATOR so a steady disturbance is trimmed out instead of being
+# balanced by standing error. Simulated (attitude mode, 0.3 m/s^2 disturbance,
+# 5.09 Hz detector as measured in that bag, 10 seeds):
+#
+#     kp .06 ki 0    kd .12   peak 0.526  never settles  final 0.510
+#     kp .12 ki 0    kd .20   peak 0.307  never settles  final 0.255
+#     kp .12 ki .02  kd .20   peak 0.306  settles  9s    final 0.000  <-- this
+#     kp .12 ki .05  kd .20   peak 0.305  settles  6s    final 0.000
+#
+# Still gentle: kp 0.12 is 6.9 deg of tilt at the frame edge, and max_tilt
+# caps everything at 8.5 deg. Raising the detection rate remains the single
+# best available improvement.
 #
 # kd: the old bare-rate law needed c*kd > kp just to avoid diverging. That
-# knife edge is gone -- the cascade stays BOUNDED at kd=0 (desired_tilt is
-# clamped and the inner loop damps it). But kd=0 still oscillates without
-# settling, so keep it non-zero; it is no longer a crash risk, just slow.
+# knife edge is gone -- desired_tilt is clamped and bounded now. But kd=0
+# still oscillates without settling, so keep it non-zero.
 # NOT yet flight tested in this form.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.06                    # [rad per unit] tilt at the frame edge (~3.4 deg)
-  ki: 0.0
-  kd: 0.12                    # [rad per unit/s] keep > 0 or it will not settle
-  i_max: 0.05                 # max integral contribution
+  kp: 0.12                    # [rad per unit] tilt at the frame edge (~6.9 deg)
+  ki: 0.02                    # [rad per unit*s] trims out steady drift; without
+                              # it a constant disturbance leaves a permanent
+                              # standing error (see the table above)
+  kd: 0.20                    # [rad per unit/s] keep > 0 or it will not settle
+  i_max: 0.05                 # [rad] max integral contribution -- this is the
+                              # trim authority: 0.05 rad of tilt cancels about
+                              # g*0.05 = 0.49 m/s^2 of steady disturbance, and
+                              # bounds how far the integrator can wind up
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.40              # [s] longest detection gap still differentiated;
                               # beyond it the D term is zeroed instead of
