@@ -16,17 +16,23 @@ control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 # ---------------------------------------------------------------------------
 mission_mode: land
 
-# Image->body sign per axis. The vision interface the controller ASSUMES is
-# point.x positive RIGHT, point.y positive DOWN (the usual top-left-origin
-# image convention). The PiOS detector does NOT use that: its frame has
-# x positive LEFT and y positive UP, so BOTH axes are inverted relative to
-# the assumption and both signs are -1.0.
+# Image->body sign per axis. The controller's vision interface assumes the
+# usual top-left-origin image convention: point.x positive RIGHT, point.y
+# positive DOWN.
 #
-# These knobs mirror the ERROR about the image centre; they never move the
-# aim point, so a detection dead centre stays zero-error whatever they are.
-# Set them so a target off to one side produces a correction TOWARD it.
-image_x_sign: -1.0            # PiOS x is positive LEFT  (assumed RIGHT)
-image_y_sign: -1.0            # PiOS y is positive UP    (assumed DOWN)
+# THIS IS THE SIMULATION CONFIG. aruco_detector.py publishes OpenCV's own
+# (u, v) from detectMarkers -- u right, v down, top-left origin -- which
+# already MATCHES that assumption, so both signs are +1.0 here.
+#
+# Do NOT copy the real-world values: the PiOS detector uses x positive LEFT
+# and y positive UP, so custom_config/ibvs_params_rw.yaml needs -1.0/-1.0.
+# The two setups genuinely differ; that mismatch is why the real aircraft
+# drove away from the tag while the simulation converged.
+#
+# These knobs mirror the ERROR about the image centre and never move the aim
+# point, so a detection dead centre stays zero-error whatever they are.
+image_x_sign: 1.0             # sim: OpenCV u is positive RIGHT (as assumed)
+image_y_sign: 1.0             # sim: OpenCV v is positive DOWN  (as assumed)
 
 # PERCH: constant climb-rate command while centered on the branch above
 # (> hover_thrust climbs; clamped to thrust_max).
