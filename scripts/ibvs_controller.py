@@ -595,11 +595,22 @@ class IbvsController:
             if self.takeoff_requested:
                 self.transition(CLIMB)
             # Mid-flight engagement (real world): the vehicle is already
-            # airborne, skip CLIMB and servo right away. Reached ONLY by the
-            # safety pilot flipping the RC switch to GUIDED_NOGPS while
-            # servoing is enabled (ibvs/start) -- the controller does not
-            # select the mode itself.
-            elif self.engage_on_target and self.servo_active:
+            # airborne, skip CLIMB and servo right away. The pilot selecting
+            # GUIDED_NOGPS is the ONLY trigger -- the controller never takes
+            # the mode itself.
+            #
+            # engage_armed (not servo_active) is the gate, and it is true from
+            # startup whenever engage_on_target is set. Requiring servo_active
+            # here made engagement ORDER-DEPENDENT: servo_active is set by a
+            # target point while armed, so if the pilot selected GUIDED_NOGPS
+            # BEFORE the first detection arrived, this branch never fired and
+            # the state sat in WAIT_ARM with the rates at exactly zero
+            # (2026-08-17-09-58-50.bag: GUIDED_NOGPS at +43.9s, first
+            # detection at +56.4s, 5.7s after the pilot had already given up
+            # and gone back to STABILIZE). Now the mode switch alone engages,
+            # and a missing detection simply means TAG_LOST until one arrives.
+            elif self.engage_on_target and self.engage_armed:
+                self.servo_active = True
                 self.transition(ALIGN if self.tag_is_fresh() else TAG_LOST)
         elif self.state == CLIMB:
             # climb until takeoff_height; climb_settle_time is the fallback
