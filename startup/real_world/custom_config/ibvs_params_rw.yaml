@@ -77,7 +77,7 @@ descend_xy_gate_px: 60        # [px] descend/climb only while centred within thi
                               # Kept LARGER than align_tolerance_px so ALIGNED
                               # always implies the descent is allowed.
 
-max_body_rate: 0.20           # [rad/s] clamp for both roll/pitch rate (~7 deg/s).
+max_body_rate: 0.10           # [rad/s] clamp for both roll/pitch rate (~7 deg/s).
                               # Deliberately slow: 0.35 (~20 deg/s) was far more
                               # authority than a hand-held bench test needs and
                               # made every D-term spike a real lurch.
@@ -93,9 +93,9 @@ max_body_rate: 0.20           # [rad/s] clamp for both roll/pitch rate (~7 deg/s
 # it -- the ratio, not the size, is what keeps the loop stable.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.20                    # [rad/s per unit] rate at the frame edge
+  kp: 0.10                    # [rad/s per unit] rate at the frame edge
   ki: 0.0
-  kd: 0.0                    # [rad/s per unit/s] MUST stay > kp/drag
+  kd: 0.20                    # [rad/s per unit/s] MUST stay > kp/drag
   i_max: 0.05                 # max integral contribution
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.15              # [s] longest detection gap still differentiated;
