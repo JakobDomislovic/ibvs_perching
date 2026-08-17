@@ -96,14 +96,21 @@ Control split:
 
          GAINS ARE LIMITED BY DETECTION RATE, not by the plant. The D term is
          computed from consecutive detections, so a slow detector both delays
-         the P term and blunts the D term. Simulated peak overshoot in
-         frame-widths, starting near the frame edge:
-             detector:      1.8Hz   5Hz   10Hz   30Hz
-             kp .15 kd .10   1.50  0.46   0.31   0.20
-             kp .06 kd .12   0.16  0.00   0.00   0.00
-         The real bags ran ~1.8 Hz, where kp 0.15 overshoots by more than a
-         whole frame width -- it loses the target entirely. Raising the
-         detection rate buys more than tuning these gains does.
+         the P term and blunts the D term. MEASURED on the 2026-08-17 bags:
+         3.8-5.9 Hz mean, median inter-arrival gap 0.157 s, ~2% of gaps are
+         multi-second stalls. Simulated against that gap distribution,
+         peak overshoot in frame-widths / settling time:
+             kp .06 kd .12   0.095 / 11s     <-- real-world config
+             kp .10 kd .15   0.404 / 29s
+             kp .15 kd .20   1.858 / never
+         Raising the detection rate is still the best available improvement;
+         at 10 Hz+ the same gains settle in ~8 s with no overshoot.
+
+         MIND ~pid_xy/d_max_dt: it must stay comfortably ABOVE the actual
+         detection gap. It shipped at 0.15 s against a measured MEDIAN gap of
+         0.157 s, so the D term was discarded on ~80% of detections and kd
+         was very nearly inert (simulated overshoot 0.369, versus 0.394 for
+         pure P). Sized at ~2.5x the median gap it works as intended.
 
          All in the body FLU convention (mavros converts FLU->FRD for
          MAVLink). Sign conventions (FLU, ROS euler): +pitch = nose down =
@@ -566,11 +573,13 @@ class IbvsController:
                 # across a gap is not a velocity, it is the tag having moved
                 # (or the vehicle having flown) while we were blind. Dividing
                 # a large jump by a large dt still yields a big number, and
-                # with kd it dominates the command -- flight-tested on
-                # 2026-08-17-09-37-31.bag, where a 1.8 Hz detector left the
-                # D term at ~63% of the commanded rate and pegged it at the
-                # clamp for 0.3 s while the error was still 130 px. Decay to
-                # zero instead and let P do the work.
+                # with kd it dominates the command. Zero it and let P work.
+                #
+                # d_max_dt must be sized against the REAL detection gap, not
+                # guessed: at 0.15 s it sat just below the measured median gap
+                # of 0.157 s, so this branch fired on ~80% of detections and
+                # silently reduced the loop to P-only. See ~pid_xy/d_max_dt in
+                # the config files.
                 self.t_x_dot = 0.0
                 self.t_y_dot = 0.0
             elif dt > 1e-3:

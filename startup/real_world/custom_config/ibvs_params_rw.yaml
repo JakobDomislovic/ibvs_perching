@@ -99,20 +99,24 @@ max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/
 # kp IS the tilt commanded at the frame edge (kp 0.06 => 3.4 deg there). This
 # is a TILT, not a rate; the inner attitude loop turns it into one.
 #
-# THESE ARE DELIBERATELY GENTLE, and the reason is DETECTION RATE, not the
-# plant. Simulated against this exact cascade (drag c=0.75, 30 Hz control,
-# starting near the frame edge), peak overshoot in frame-widths:
+# THESE ARE DELIBERATELY GENTLE, and the limit is DETECTION RATE, not the
+# plant. MEASURED on ibvs/target_point across the 2026-08-17 bags: mean
+# 3.8-5.9 Hz, median inter-arrival gap 0.157 s, p90 0.182 s, with ~2% of gaps
+# being multi-second stalls. (An earlier comment here claimed 1.8 Hz, from a
+# single early-morning bag; the real figure is ~3x better than that.)
 #
-#     detector:        1.8Hz    5Hz    10Hz    30Hz
-#     kp .15 kd .10     1.50   0.46    0.31    0.20
-#     kp .10 kd .15     0.84   0.14    0.03    0.00
-#     kp .06 kd .12     0.16   0.00    0.00    0.00   <-- this file
+# Simulated against this cascade with that measured gap distribution
+# (drag c=0.75, 30 Hz control, start near the frame edge), 25 seeds:
 #
-# The bags ran the PiOS detector at ~1.8 Hz. At that rate anything near
-# kp 0.15 overshoots by MORE THAN A FRAME WIDTH -- i.e. it loses the target
-# completely, which is what "it just went somewhere" looks like. RAISING THE
-# DETECTION RATE buys far more than tuning these gains does; if you get the
-# detector to 10 Hz+, kp 0.10 / kd 0.15 settles in ~7 s.
+#     config                       overshoot   settle
+#     kp .06 kd .12  d_max_dt .40      0.095      11s   <-- this file
+#     kp .10 kd .15  d_max_dt .40      0.404      29s
+#     kp .15 kd .20  d_max_dt .40      1.858    never
+#
+# kp 0.15 overshoots by nearly two frame widths at this detection rate -- it
+# loses the target completely, which is what "it just went somewhere" looks
+# like. Raising the detection rate is still the highest-value change
+# available; at 10 Hz+ these gains settle in ~8 s with no overshoot.
 #
 # kd: the old bare-rate law needed c*kd > kp just to avoid diverging. That
 # knife edge is gone -- the cascade stays BOUNDED at kd=0 (desired_tilt is
@@ -126,9 +130,16 @@ pid_xy:
   kd: 0.12                    # [rad per unit/s] keep > 0 or it will not settle
   i_max: 0.05                 # max integral contribution
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
-  d_max_dt: 0.15              # [s] longest detection gap still differentiated;
+  d_max_dt: 0.40              # [s] longest detection gap still differentiated;
                               # beyond it the D term is zeroed instead of
-                              # computed across the gap (see ibvs_controller.py)
+                              # computed across the gap.
+                              # WAS 0.15, which sat just BELOW the measured
+                              # median gap of 0.157 s -- so the D term was
+                              # being discarded on ~80% of detections and kd
+                              # was very nearly inert (simulated: overshoot
+                              # 0.369 vs 0.394 for pure P). 0.40 is ~2.5x the
+                              # median gap: D survives normal detections and
+                              # is still rejected across the real stalls.
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds

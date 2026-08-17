@@ -106,10 +106,11 @@ max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/
 # kp IS the tilt commanded at the frame edge (kp 0.10 => 5.7 deg there). A
 # TILT, not a rate -- the inner attitude loop turns it into one.
 #
-# These suit the SIM detector's 15 Hz (aruco_detector ~process_rate). Gains
-# tolerable here are NOT safe on the real aircraft, whose detector ran ~1.8 Hz
-# -- overshoot grows sharply as detection rate drops, so the real-world config
-# uses gentler values. See the table in
+# These suit the SIM detector's 15 Hz (aruco_detector ~process_rate), i.e. a
+# ~0.067 s gap between detections. Gains tolerable here are NOT safe on the
+# real aircraft, whose detector measures 3.8-5.9 Hz (median gap 0.157 s) --
+# overshoot grows sharply as detection rate drops, so the real-world config
+# uses gentler values. See the measured table in
 # startup/real_world/custom_config/ibvs_params_rw.yaml.
 #
 # The D term differentiates the DETECTION (there is no body-velocity estimate
@@ -124,9 +125,14 @@ pid_xy:
   kd: 0.15                    # [rad per unit/s] keep > 0 or it will not settle
   i_max: 0.05                 # max integral contribution
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
-  d_max_dt: 0.15              # [s] longest detection gap still differentiated;
+  d_max_dt: 0.20              # [s] longest detection gap still differentiated;
                               # beyond it the D term is zeroed instead of
-                              # computed across the gap (see ibvs_controller.py)
+                              # computed across the gap. ~3x the sim's 0.067 s
+                              # detection gap, so D survives normal frames and
+                              # is only dropped across a genuine stall. (Keep
+                              # this comfortably ABOVE the actual gap or kd
+                              # goes inert -- that is what happened in the
+                              # real-world config, see ibvs_params_rw.yaml.)
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
