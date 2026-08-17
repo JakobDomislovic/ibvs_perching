@@ -76,13 +76,17 @@ thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] CLIMB ends when odometry z reaches this
 
 # ---------------------------------------------------------------------------
-# X-Y axis -- direct law on the image error, NO attitude loop:
-#   body_rate = kp * error + kd * d(error)/dt        (clamped)
+# X-Y axis -- CASCADE on the image error, with an IMU attitude inner loop:
+#   desired_tilt = PID_xy(error)                     (clamped to max_tilt)
+#   body_rate    = kp_att * (desired_tilt - current_tilt)
 # The error is the detection's offset from centre, normalized per axis by its
 # own half-dimension, so it is +-1.0 at that axis' frame edge. No fx/fy, no
 # depth_guess, NO CAMERA CALIBRATION anywhere in the chain.
 # ~image_width / ~image_height come from ibvs_perching.launch (640x480 for the
 # sim camera) so they cannot drift from the resolution the detector reports.
+#
+# Attitude comes from mavros/imu/data (the FCU's AHRS) -- no position solution
+# needed, so the same code path works in sim and on the real aircraft.
 # ---------------------------------------------------------------------------
 target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
 target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
@@ -91,26 +95,33 @@ descend_xy_gate_px: 60        # [px] descend only while centred within this radi
                               # Kept LARGER than align_tolerance_px so ALIGNED
                               # always implies the descent is allowed.
 
-max_body_rate: 0.12           # [rad/s] clamp for both roll/pitch rate (~7 deg/s).
-                              # Deliberately slow: 0.35 (~20 deg/s) was far more
-                              # authority than a hand-held bench test needs and
-                              # made every D-term spike a real lurch.
+max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg). THE key
+                              # safety limit: never commanded steeper than this.
+kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
+max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s).
+                              # Keep >= kp_att * max_tilt (= 0.225 here).
 
 # ---------------------------------------------------------------------------
-# PID gains. UNITS: kp is rad/s per unit frame-fraction, i.e. kp IS the rate
-# commanded at the frame edge. The D term differentiates the DETECTION (there
-# is no odometry velocity in the real-world setup).
+# OUTER-loop PID gains. UNITS: kp is rad of TILT per unit frame-fraction, so
+# kp IS the tilt commanded at the frame edge (kp 0.10 => 5.7 deg there). A
+# TILT, not a rate -- the inner attitude loop turns it into one.
 #
-# Stability: the loop is third order (tilt integrates the rate command), and
-# with no attitude feedback the only x'' damping is aerodynamic drag c, so
-# Routh-Hurwitz needs  c * kd > kp.  At a representative c ~ 0.75 these give
-# 0.75*0.25 = 0.19 > 0.10, a ~1.9x margin. kd MUST stay non-zero.
+# These suit the SIM detector's 15 Hz (aruco_detector ~process_rate). Gains
+# tolerable here are NOT safe on the real aircraft, whose detector ran ~1.8 Hz
+# -- overshoot grows sharply as detection rate drops, so the real-world config
+# uses gentler values. See the table in
+# startup/real_world/custom_config/ibvs_params_rw.yaml.
+#
+# The D term differentiates the DETECTION (there is no body-velocity estimate
+# in the real-world setup, so the same source is used in both). With the
+# cascade, kd=0 no longer DIVERGES the way the old bare-rate law did, but it
+# still oscillates without settling -- keep kd non-zero.
 # i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.10                    # [rad/s per unit] rate at the frame edge
+  kp: 0.10                    # [rad per unit] tilt at the frame edge (~5.7 deg)
   ki: 0.0
-  kd: 0.25                    # [rad/s per unit/s] MUST stay > kp/drag
+  kd: 0.15                    # [rad per unit/s] keep > 0 or it will not settle
   i_max: 0.05                 # max integral contribution
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.15              # [s] longest detection gap still differentiated;

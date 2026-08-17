@@ -6,9 +6,10 @@
 # There is NO range sensor and NO OptiTrack -- the vertical axis is open-rate.
 #
 # The safety pilot flies MANUALLY (STABILIZE). The controller streams
-# setpoints continuously; ArduPilot only acts on them in GUIDED_NOGPS, which
-# the controller seizes itself on the first fresh target point. The pilot
-# takes back control with the RC mode switch.
+# setpoints continuously; ArduPilot only acts on them in GUIDED_NOGPS, and
+# the PILOT is the one who selects that on the RC mode switch -- this node
+# never changes the flight mode by itself. Flipping the switch away hands
+# control back instantly, from any state.
 #
 # GUID_OPTIONS must be 0 on the FCU (set in the startup session): thrust is a
 # CLIMB RATE (0.0 max descent, 0.5 hover, 1.0 max climb), NOT raw thrust.
@@ -32,9 +33,9 @@ image_x_sign: -1.0            # PiOS x is positive LEFT  (assumed RIGHT)
 image_y_sign: -1.0            # PiOS y is positive UP    (assumed DOWN)
 
 # ---------------------------------------------------------------------------
-# Engagement (real world): nothing is primed at startup. The controller
-# seizes GUIDED_NOGPS itself on a fresh target point; ibvs/start and
-# ibvs/stop work either way.
+# Engagement (real world): the FCU mode is the PILOT'S. This node never
+# switches it -- only the explicit ibvs/takeoff service may. ibvs/stop
+# disables servoing, ibvs/start re-enables it.
 # ---------------------------------------------------------------------------
 engage_on_target: true        # skip CLIMB and servo straight away once armed
                               # and in GUIDED_NOGPS. The controller does NOT
@@ -63,13 +64,19 @@ land_disarm_height: 0.15      # [m] odometry altitude below which disarm trigger
 land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 
 # ---------------------------------------------------------------------------
-# X-Y axis -- direct law on the image error, NO attitude loop:
-#   body_rate = kp * error + kd * d(error)/dt        (clamped)
+# X-Y axis -- CASCADE on the image error, with an IMU attitude inner loop:
+#   desired_tilt = PID_xy(error)                     (clamped to max_tilt)
+#   body_rate    = kp_att * (desired_tilt - current_tilt)
 # The error is the detection's offset from centre normalized per axis by its
 # own half-dimension, so it is +-1.0 at that axis' frame edge. No fx/fy, no
 # depth_guess, NO CAMERA CALIBRATION anywhere in the chain.
 # ~image_width / ~image_height come from the launch, not from here, so they
 # cannot drift from the resolution the detector actually reports.
+#
+# Attitude comes from mavros/imu/data (the FCU's AHRS), which needs no
+# position solution -- it works with no GPS and no OptiTrack. This is the
+# overshoot fix: the inner loop actively pulls the built-up tilt back toward
+# level as the error shrinks, which a bare rate command could never do.
 # ---------------------------------------------------------------------------
 target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
 target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
@@ -77,25 +84,46 @@ descend_xy_gate_px: 60        # [px] descend/climb only while centred within thi
                               # Kept LARGER than align_tolerance_px so ALIGNED
                               # always implies the descent is allowed.
 
-max_body_rate: 0.10           # [rad/s] clamp for both roll/pitch rate (~7 deg/s).
-                              # Deliberately slow: 0.35 (~20 deg/s) was far more
-                              # authority than a hand-held bench test needs and
-                              # made every D-term spike a real lurch.
+max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg). THE key
+                              # safety limit: the vehicle can never be
+                              # commanded steeper than this, however big the
+                              # pixel error gets.
+kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
+max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s).
+                              # Keep >= kp_att * max_tilt (= 0.225 here) or the
+                              # inner loop saturates before it can track a
+                              # full-scale tilt command.
 
 # ---------------------------------------------------------------------------
-# PID gains. UNITS CHANGED with the law: kp is rad/s per unit frame-fraction,
-# i.e. kp IS the rate commanded at the frame edge. NOT flight tested.
+# OUTER-loop PID gains. UNITS: kp is rad of TILT per unit frame-fraction, so
+# kp IS the tilt commanded at the frame edge (kp 0.06 => 3.4 deg there). This
+# is a TILT, not a rate; the inner attitude loop turns it into one.
 #
-# Stability: the loop is third order (tilt integrates the rate command), and
-# with no attitude feedback the only x'' damping is aerodynamic drag c, so
-# Routh-Hurwitz needs  c * kd > kp.  At a representative c ~ 0.75 these values
-# give 0.75*0.25 = 0.19 > 0.10, a ~1.9x margin. If you raise kp, raise kd with
-# it -- the ratio, not the size, is what keeps the loop stable.
+# THESE ARE DELIBERATELY GENTLE, and the reason is DETECTION RATE, not the
+# plant. Simulated against this exact cascade (drag c=0.75, 30 Hz control,
+# starting near the frame edge), peak overshoot in frame-widths:
+#
+#     detector:        1.8Hz    5Hz    10Hz    30Hz
+#     kp .15 kd .10     1.50   0.46    0.31    0.20
+#     kp .10 kd .15     0.84   0.14    0.03    0.00
+#     kp .06 kd .12     0.16   0.00    0.00    0.00   <-- this file
+#
+# The bags ran the PiOS detector at ~1.8 Hz. At that rate anything near
+# kp 0.15 overshoots by MORE THAN A FRAME WIDTH -- i.e. it loses the target
+# completely, which is what "it just went somewhere" looks like. RAISING THE
+# DETECTION RATE buys far more than tuning these gains does; if you get the
+# detector to 10 Hz+, kp 0.10 / kd 0.15 settles in ~7 s.
+#
+# kd: the old bare-rate law needed c*kd > kp just to avoid diverging. That
+# knife edge is gone -- the cascade stays BOUNDED at kd=0 (desired_tilt is
+# clamped and the inner loop damps it). But kd=0 still oscillates without
+# settling, so keep it non-zero; it is no longer a crash risk, just slow.
+# NOT yet flight tested in this form.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.10                    # [rad/s per unit] rate at the frame edge
+  kp: 0.06                    # [rad per unit] tilt at the frame edge (~3.4 deg)
   ki: 0.0
-  kd: 0.20                    # [rad/s per unit/s] MUST stay > kp/drag
+  kd: 0.12                    # [rad per unit/s] keep > 0 or it will not settle
   i_max: 0.05                 # max integral contribution
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.15              # [s] longest detection gap still differentiated;
