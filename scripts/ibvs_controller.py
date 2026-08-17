@@ -405,6 +405,10 @@ class IbvsController:
         self.setpoint_pub = rospy.Publisher(
             'mavros/setpoint_raw/attitude', AttitudeTarget, queue_size=1)
         self.state_pub = rospy.Publisher('ibvs/state', String, queue_size=1, latch=True)
+        # Pixel error the loop is actually working on: detection minus the aim
+        # point, in raw pixels, published on every detection so it can be
+        # plotted straight against ibvs/target_point and the commanded rates.
+        self.error_pub = rospy.Publisher('ibvs/error', PointStamped, queue_size=1)
         # latch the initial state too -- transitions alone would leave the
         # topic silent until the first state change
         self.state_pub.publish(String(data=self.state))
@@ -528,6 +532,18 @@ class IbvsController:
         self.t_x = t_x
         self.t_y = t_y
         self.last_tag_time = now
+
+        # pixel error: detection minus the aim point, in the IMAGE frame
+        # (no signs, no normalization) -- positive x = right of centre,
+        # positive y = below centre, exactly as the detector reports them.
+        # z is always 0: there is no depth here, only a 2-D image offset.
+        err = PointStamped()
+        err.header.stamp = now
+        err.header.frame_id = msg.header.frame_id
+        err.point.x = msg.point.x - half_w
+        err.point.y = msg.point.y - half_h
+        err.point.z = 0.0
+        self.error_pub.publish(err)
 
         # A target point ENABLES SERVOING, but never touches the FCU mode --
         # that belongs to the safety pilot. The controller still only acts
@@ -797,8 +813,11 @@ class IbvsController:
         msg = AttitudeTarget()
         msg.header.stamp = rospy.Time.now()
         msg.type_mask = AttitudeTarget.IGNORE_ATTITUDE
-        msg.body_rate.x = roll_rate
-        msg.body_rate.y = pitch_rate
+        #msg.body_rate.x = roll_rate
+        #msg.body_rate.y = pitch_rate
+        msg.body_rate.x = -1 * pitch_rate
+        msg.body_rate.y =  roll_rate
+
         msg.body_rate.z = 0.0
         msg.thrust = 0.5 #thrust #samo za probu
         self.setpoint_pub.publish(msg)

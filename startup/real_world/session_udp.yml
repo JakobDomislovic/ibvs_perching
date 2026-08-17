@@ -34,6 +34,7 @@ windows:
         # single lightweight monitor: the IBVS state machine
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
+        - waitForRos; rostopic echo /red/ibvs/error
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
         
