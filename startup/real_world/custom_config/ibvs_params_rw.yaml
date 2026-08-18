@@ -144,7 +144,7 @@ max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/
 # NOT yet flight tested in this form.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.12                    # [rad per unit] tilt at the frame edge (~6.9 deg)
+  kp: 0.08                    # [rad per unit] tilt at the frame edge (~6.9 deg)
   ki: 0.00                    # [rad per unit*s] trims out steady drift; without
                               # it a constant disturbance leaves a permanent
                               # standing error (see the table above)

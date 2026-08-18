@@ -951,7 +951,7 @@ class IbvsController:
             # matched (error, d(error)/dt) pair -- err_x = -t_x, so
             # d(-err_x)/dt = +t_x_dot; err_y = -t_y, so d(err_y)/dt = -t_y_dot.
             desired_roll = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
-            desired_pitch = self.pid_y.update(err_y, -self.t_y_dot, self.dt)
+            desired_pitch = self.pid_y.update(-err_y, self.t_y_dot, self.dt)
         else:
             # PIDs not running: clear their debug terms so ibvs/pid_* reads 0
             # instead of holding whatever it last computed while servoing.
