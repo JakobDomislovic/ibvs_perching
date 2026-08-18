@@ -188,7 +188,7 @@ pid_xy:
                               # standing error above -- it needs a permanent
                               # offset to generate the tilt that balances drift.
                               # Set ~0.02 once the direction is confirmed.
-  kd: 0.00                    # OFF for this test. This is the braking term: it
+  kd: 0.09                    # OFF for this test. This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
                               # with kd 0 expect overshoot on the way in.
   i_max: 0.05                 # [rad] max integral contribution -- this is the
@@ -211,11 +211,11 @@ pid_xy:
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
-align_tolerance_px: 40        # [px] target must be within this many pixels of
+align_tolerance_px: 50        # [px] target must be within this many pixels of
                               # the aim point to count as "aligned" -- the
                               # doubled tolerance, now stated in pixels
                               # directly (was 0.30 m at fx=251/depth 2.0).
                               # Exits ALIGNED at 60 px via align_hysteresis.
-align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
+align_dwell_time: 1.5         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST
