@@ -94,7 +94,7 @@ land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 # ---------------------------------------------------------------------------
 target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
 target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
-descend_xy_gate_px: 80        # [px] descend/climb only while centred within this.
+descend_xy_gate_px: 70        # [px] descend/climb only while centred within this.
                               # Kept LARGER than align_tolerance_px so ALIGNED
                               # always implies the descent is allowed.
 
@@ -121,7 +121,7 @@ command_mode: attitude
 # standing error is genuine steady state). That eats 1.44 deg = 72% of a 2 deg
 # budget, leaving only ~0.10 m/s2 to actually manoeuvre with. Fine for a slow
 # direction-check; raise to 3-5 deg if it cannot make headway.
-max_tilt: 0.05               # [rad] desired-tilt clamp (2.0 deg)
+max_tilt: 0.035               # [rad] desired-tilt clamp (2.0 deg)
 
 # RATE mode only (ignored when command_mode is 'attitude').
 kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
@@ -188,14 +188,14 @@ pid_xy:
                               # standing error above -- it needs a permanent
                               # offset to generate the tilt that balances drift.
                               # Set ~0.02 once the direction is confirmed.
-  kd: 0.09                    # OFF for this test. This is the braking term: it
+  kd: 0.05                    # OFF for this test. This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
                               # with kd 0 expect overshoot on the way in.
   i_max: 0.025                 # [rad] max integral contribution -- this is the
                               # trim authority: 0.05 rad of tilt cancels about
                               # g*0.05 = 0.49 m/s^2 of steady disturbance, and
                               # bounds how far the integrator can wind up
-  d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
+  d_filter: 0.06              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.40              # [s] longest detection gap still differentiated;
                               # beyond it the D term is zeroed instead of
                               # computed across the gap.
