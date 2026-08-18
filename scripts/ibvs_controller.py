@@ -412,6 +412,16 @@ class IbvsController:
         self.target_x = rospy.get_param('~target_x', 0.0)
         self.target_y = rospy.get_param('~target_y', 0.0)
 
+        # The same aim point expressed in PIXELS, as an offset from the frame
+        # centre. lateral_error_px works directly in pixels (see there), so it
+        # needs the setpoint in pixels too. Inverting the t_x/t_y mapping of
+        # target_callback: t = sign * offset_px / half_w for x, and
+        # t = -sign * offset_px / half_w for y; the signs are +-1 so dividing
+        # by one is the same as multiplying. Constant, so computed once.
+        _half_w = self.image_width / 2.0
+        self.aim_px_x = self.target_x * _half_w * self.image_x_sign
+        self.aim_px_y = -self.target_y * _half_w * self.image_y_sign
+
         # PID gains for the OUTER loop. NOTE the units: kp is rad of TILT per
         # unit of frame-fraction error, so kp IS the tilt commanded at the
         # frame edge (set kp == max_tilt and the frame edge maps to the tilt
@@ -489,6 +499,13 @@ class IbvsController:
         # the vertical (climb/descend) is open-rate, not target-relative.
         self.t_x = None
         self.t_y = None
+        # Detection offset from the frame centre in RAW PIXELS, (dx, dy).
+        # Kept separately from t_x/t_y on purpose: the pixel thresholds
+        # (align_tolerance_px, descend_xy_gate_px) must not depend on how the
+        # control law happens to normalize, so lateral_error_px reads this and
+        # never reconstructs pixels from a frame-fraction. None until the first
+        # detection.
+        self.err_px = None
         # d(target)/dt, differentiated from consecutive detections (filtered).
         # Outer-loop damping only -- there is no body-velocity estimate in
         # this setup (no GPS / OptiTrack), and unlike the bare rate law this
@@ -678,11 +695,15 @@ class IbvsController:
         # (no signs, no normalization) -- positive x = right of centre,
         # positive y = below centre, exactly as the detector reports them.
         # z is always 0: there is no depth here, only a 2-D image offset.
+        # This is also what the pixel thresholds are measured against, so it
+        # is stored, not just published.
+        self.err_px = (msg.point.x - half_w, msg.point.y - half_h)
+
         err = PointStamped()
         err.header.stamp = now
         err.header.frame_id = msg.header.frame_id
-        err.point.x = msg.point.x - half_w
-        err.point.y = msg.point.y - half_h
+        err.point.x = self.err_px[0]
+        err.point.y = self.err_px[1]
         err.point.z = 0.0
         self.error_pub.publish(err)
 
@@ -815,21 +836,28 @@ class IbvsController:
         return ready_to_fly
 
     def lateral_error_px(self):
-        """Distance of the tracked point from the aim point, in real PIXELS,
-        or None without a detection.
+        """Distance of the detection from the aim point, in real PIXELS, or
+        None without a detection.
 
-        target_callback normalizes BOTH axes by half_w (see the note there),
-        so both are scaled back out by half_w to recover pixels. Using
-        half_h for y here would under-report the vertical error by the aspect
-        ratio and silently loosen align_tolerance_px / descend_xy_gate_px on
-        that axis.
+        Works ENTIRELY IN PIXELS: it reads the raw offset stored by
+        target_callback (self.err_px) rather than reconstructing pixels from
+        the normalized t_x/t_y. That decoupling is deliberate. The old version
+        divided by a half-dimension in target_callback and multiplied by one
+        here, 180 lines apart -- so changing the normalization silently
+        rescaled align_tolerance_px and descend_xy_gate_px, and mismatching
+        the two under-reported the vertical error by the aspect ratio (0.56x
+        at 16:9) with no error anywhere. Now the thresholds mean "N pixels
+        from the aim point" no matter what the control law does upstream.
+
+        aim_px_* is the setpoint in the same pixel frame (computed once in
+        __init__), so a non-zero ~target_x / ~target_y still shifts the aim
+        point rather than being silently ignored.
         """
-        if self.t_x is None:
+        if self.err_px is None:
             return None
-        half_w = self.image_width / 2.0
-        err_x = (self.target_x - self.t_x) * half_w
-        err_y = (self.target_y - self.t_y) * half_w
-        return (err_x ** 2 + err_y ** 2) ** 0.5
+        dx = self.err_px[0] - self.aim_px_x
+        dy = self.err_px[1] - self.aim_px_y
+        return math.hypot(dx, dy)
 
     def compute_thrust(self):
         """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
@@ -1054,7 +1082,7 @@ class IbvsController:
             msg.body_rate.y = pitch_rate
             msg.body_rate.z = 0.0
 
-        msg.thrust = 0.5 # thrust
+        msg.thrust = thrust
         self.setpoint_pub.publish(msg)
 
     def commanded_yaw(self, att):
