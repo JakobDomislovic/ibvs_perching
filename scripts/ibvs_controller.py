@@ -280,9 +280,23 @@ class Pid:
         self.out_max = out_max
         self.i_max = i_max      # clamp on the INTEGRAL CONTRIBUTION (ki * integral)
         self.integral = 0.0
+        # Last individual contributions, kept for the ibvs/pid_* debug topics.
+        # These are the terms BEFORE the output clamp, so comparing their sum
+        # against max_tilt shows when the clamp is actually biting.
+        self.p_term = 0.0
+        self.i_term = 0.0
+        self.d_term = 0.0
 
     def reset(self):
         self.integral = 0.0
+        self.zero_terms()
+
+    def zero_terms(self):
+        """Clear the debug terms -- used when this PID is not being run, so
+        the debug topic shows 0 rather than the last value from minutes ago."""
+        self.p_term = 0.0
+        self.i_term = 0.0
+        self.d_term = 0.0
 
     def update(self, error, error_dot, dt):
         i_term = 0.0
@@ -293,7 +307,11 @@ class Pid:
                                   -self.i_max / self.ki, self.i_max / self.ki)
             i_term = self.ki * self.integral
 
-        out = self.kp * error + i_term + self.kd * error_dot
+        self.p_term = self.kp * error
+        self.i_term = i_term
+        self.d_term = self.kd * error_dot
+
+        out = self.p_term + self.i_term + self.d_term
         return clamp(out, self.out_min, self.out_max)
 
 
@@ -497,6 +515,25 @@ class IbvsController:
         # point, in raw pixels, published on every detection so it can be
         # plotted straight against ibvs/target_point and the commanded rates.
         self.error_pub = rospy.Publisher('ibvs/error', PointStamped, queue_size=1)
+
+        # --- debug topics, published every control tick (see publish_debug) ---
+        # Individual PID contributions, in RADIANS of desired tilt, one topic
+        # per axis: PointStamped x = P term, y = I term, z = D term. There are
+        # two independent PIDs and only three slots in a PointStamped, hence
+        # two topics rather than one. Their sum is the desired tilt BEFORE the
+        # max_tilt clamp, so sum vs max_tilt shows when the clamp is biting.
+        self.pid_roll_pub = rospy.Publisher(
+            'ibvs/pid_roll', PointStamped, queue_size=1)
+        self.pid_pitch_pub = rospy.Publisher(
+            'ibvs/pid_pitch', PointStamped, queue_size=1)
+        # Attitude actually being commanded, in RADIANS:
+        #   x = alpha = roll, y = beta = pitch, z = gamma = yaw
+        # This is exactly what goes into the quaternion in attitude mode
+        # (after the max_tilt clamp), so it can be plotted straight against
+        # mavros/imu/data to see the tracking error.
+        self.angles_pub = rospy.Publisher(
+            'ibvs/control_angles', PointStamped, queue_size=1)
+
         # latch the initial state too -- transitions alone would leave the
         # topic silent until the first state change
         self.state_pub.publish(String(data=self.state))
@@ -915,6 +952,11 @@ class IbvsController:
             # d(-err_x)/dt = +t_x_dot; err_y = -t_y, so d(err_y)/dt = -t_y_dot.
             desired_roll = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
             desired_pitch = self.pid_y.update(err_y, -self.t_y_dot, self.dt)
+        else:
+            # PIDs not running: clear their debug terms so ibvs/pid_* reads 0
+            # instead of holding whatever it last computed while servoing.
+            self.pid_x.zero_terms()
+            self.pid_y.zero_terms()
 
         return desired_roll, desired_pitch
 
@@ -939,6 +981,7 @@ class IbvsController:
         thrust = self.compute_thrust()
         desired_roll, desired_pitch = self.compute_desired_tilt()
         self.publish_setpoint(desired_roll, desired_pitch, thrust)
+        self.publish_debug(desired_roll, desired_pitch)
         if self.mission_mode == MODE_LAND:
             self.maybe_land_disarm()
 
@@ -973,7 +1016,7 @@ class IbvsController:
         att = self.current_attitude()
 
         if self.command_mode == CMD_ATTITUDE and att is not None:
-            yaw = self.yaw_setpoint if self.yaw_setpoint is not None else att[2]
+            yaw = self.commanded_yaw(att)
             q = tft.quaternion_from_euler(desired_roll, desired_pitch, yaw)
             msg.type_mask = (AttitudeTarget.IGNORE_ROLL_RATE |
                              AttitudeTarget.IGNORE_PITCH_RATE |
@@ -997,6 +1040,53 @@ class IbvsController:
 
         msg.thrust = thrust
         self.setpoint_pub.publish(msg)
+
+    def commanded_yaw(self, att):
+        """Yaw that goes into the attitude target [rad].
+
+        yaw_setpoint while servoing (latched on ALIGN entry, so the approach
+        holds the heading it engaged at); otherwise the current yaw, which
+        asks for no change. None if there is no attitude source yet.
+        """
+        if self.yaw_setpoint is not None:
+            return self.yaw_setpoint
+        return att[2] if att is not None else None
+
+    def publish_debug(self, desired_roll, desired_pitch):
+        """Debug topics, published every control tick.
+
+        ibvs/pid_roll, ibvs/pid_pitch  (PointStamped, RADIANS)
+            x = P term, y = I term, z = D term -- the individual contributions
+            BEFORE the max_tilt clamp, so their sum against max_tilt shows
+            when the clamp is active. One topic per axis: there are two
+            independent PIDs and a PointStamped only has three slots. Zero
+            outside ALIGN/ALIGNED, where the PIDs do not run.
+
+        ibvs/control_angles  (PointStamped, RADIANS)
+            x = alpha = roll, y = beta = pitch, z = gamma = yaw -- the
+            attitude actually being commanded, AFTER the clamp. In attitude
+            mode this is exactly what the published quaternion encodes, so it
+            can be plotted straight against mavros/imu/data to read off the
+            tracking error. Yaw is the held heading, not a servoed axis.
+        """
+        now = rospy.Time.now()
+
+        for pub, pid in ((self.pid_roll_pub, self.pid_x),
+                         (self.pid_pitch_pub, self.pid_y)):
+            m = PointStamped()
+            m.header.stamp = now
+            m.point.x = pid.p_term
+            m.point.y = pid.i_term
+            m.point.z = pid.d_term
+            pub.publish(m)
+
+        ang = PointStamped()
+        ang.header.stamp = now
+        ang.point.x = desired_roll                        # alpha
+        ang.point.y = desired_pitch                       # beta
+        yaw = self.commanded_yaw(self.current_attitude())
+        ang.point.z = yaw if yaw is not None else 0.0     # gamma
+        self.angles_pub.publish(ang)
 
 
 if __name__ == '__main__':

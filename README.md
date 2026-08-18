@@ -341,9 +341,14 @@ commits the grab.
 |---|---|---|---|
 | sub | `mavros/state` | `mavros_msgs/State` | armed flag + flight mode |
 | sub | `ibvs/target_point` | `geometry_msgs/PointStamped` | the vision-module interface (see §3) |
-| sub | `mavros/local_position/odom` | `nav_msgs/Odometry` | attitude + body velocity for the cascade |
+| sub | `mavros/imu/data` | `sensor_msgs/Imu` | AHRS attitude — needs no position fix, so it works with no GPS/OptiTrack |
+| sub | `mavros/local_position/odom` | `nav_msgs/Odometry` | **altitude only** (takeoff height, landing disarm); never publishes without an EKF position fix |
 | pub | `mavros/setpoint_raw/attitude` | `mavros_msgs/AttitudeTarget` | at `control_rate` |
 | pub | `ibvs/state` | `std_msgs/String` | latched, on transitions |
+| pub | `ibvs/error` | `geometry_msgs/PointStamped` | pixel error `detection − centre`; published **per detection**, so it goes silent when the detector stalls |
+| pub | `ibvs/pid_roll` | `geometry_msgs/PointStamped` | **debug**, rad: `x`=P, `y`=I, `z`=D term of the roll PID, *before* the `max_tilt` clamp |
+| pub | `ibvs/pid_pitch` | `geometry_msgs/PointStamped` | **debug**, rad: same for the pitch PID |
+| pub | `ibvs/control_angles` | `geometry_msgs/PointStamped` | **debug**, rad: `x`=α roll, `y`=β pitch, `z`=γ yaw — the attitude actually commanded, *after* the clamp |
 
 Parameters (all private, loaded from
 [`config/ibvs_params.yaml`](config/ibvs_params.yaml)):

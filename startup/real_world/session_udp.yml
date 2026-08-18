@@ -34,7 +34,10 @@ windows:
         # single lightweight monitor: the IBVS state machine
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
-        - waitForRos; rostopic echo /red/ibvs/error
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/error
+        # commanded attitude: x=roll y=pitch z=yaw [rad] (ibvs/pid_roll and
+        # ibvs/pid_pitch carry the P/I/D split; plot those rather than echo)
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/control_angles
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
         
