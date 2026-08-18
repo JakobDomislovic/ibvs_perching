@@ -188,14 +188,14 @@ pid_xy:
                               # standing error above -- it needs a permanent
                               # offset to generate the tilt that balances drift.
                               # Set ~0.02 once the direction is confirmed.
-  kd: 0.05                    # OFF for this test. This is the braking term: it
+  kd: 0.09                    # OFF for this test. This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
                               # with kd 0 expect overshoot on the way in.
   i_max: 0.025                 # [rad] max integral contribution -- this is the
                               # trim authority: 0.05 rad of tilt cancels about
                               # g*0.05 = 0.49 m/s^2 of steady disturbance, and
                               # bounds how far the integrator can wind up
-  d_filter: 0.06              # EMA on the differentiated detection (1.0 = off)
+  d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.40              # [s] longest detection gap still differentiated;
                               # beyond it the D term is zeroed instead of
                               # computed across the gap.
