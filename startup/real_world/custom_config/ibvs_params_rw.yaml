@@ -29,8 +29,22 @@ mission_mode: land
 # These knobs mirror the ERROR about the image centre; they never move the
 # aim point, so a detection dead centre stays zero-error whatever they are.
 # Set them so a target off to one side produces a correction TOWARD it.
-image_x_sign: -1.0            # PiOS x is positive LEFT  (assumed RIGHT)
-image_y_sign: -1.0            # PiOS y is positive UP    (assumed DOWN)
+# MEASURED from 2026-08-18-11-54-50.bag, both engagement windows, 104
+# detections: at -1/-1 the commanded angle pushed the error the WRONG WAY on
+# BOTH axes in 104 of 104 samples (the command sat saturated at max_tilt while
+# the error grew monotonically -- textbook positive feedback). At +1/+1 the
+# same 104 samples are correct 104/104.
+#
+# So the PiOS detector uses the ORDINARY top-left-origin convention after all
+# -- x positive RIGHT, y positive DOWN -- exactly like OpenCV and the sim.
+# The earlier -1/-1 came from inferring the convention out of bag statistics
+# (bd3313d) rather than measuring it, and that inference was wrong.
+#
+# With your frames (camera +x EAST, +y SOUTH; body +x NORTH, +y WEST):
+#   err.x > 0 -> target right in image -> EAST  -> needs +roll
+#   err.y > 0 -> target down  in image -> SOUTH -> needs -pitch
+image_x_sign: 1.0             # PiOS x is positive RIGHT (as the controller assumes)
+image_y_sign: 1.0             # PiOS y is positive DOWN  (as the controller assumes)
 
 # ---------------------------------------------------------------------------
 # Engagement (real world): the FCU mode is the PILOT'S. This node never
