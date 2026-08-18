@@ -1038,7 +1038,7 @@ class IbvsController:
             msg.body_rate.y = pitch_rate
             msg.body_rate.z = 0.0
 
-        msg.thrust = thrust
+        msg.thrust = 0.5 # thrust
         self.setpoint_pub.publish(msg)
 
     def commanded_yaw(self, att):
