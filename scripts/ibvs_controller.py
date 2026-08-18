@@ -616,11 +616,24 @@ class IbvsController:
 
         point.x/point.y are where the detection sits in the image, in whole
         pixels (positive right / positive down); point.z is ignored (there is
-        no range sensor). Each axis is normalized by its OWN half-dimension,
-        so the error is +-1.0 at that axis' frame edge -- independent of the
-        resolution, and symmetric between a 16:9 frame's wide and short
-        axes. The image_*_sign knobs map the image axes to the body frame for
-        the down (land) vs up (perch) camera.
+        no range sensor). The image_*_sign knobs map the image axes to the
+        body frame for the down (land) vs up (perch) camera.
+
+        BOTH AXES ARE NORMALIZED BY THE SAME half-dimension (half_w), NOT each
+        by its own. With fx ~ fy, equal ANGULAR offset produces equal PIXEL
+        offset on both axes, so dividing y by the shorter half_h would make
+        the pitch loop hotter than roll by exactly the aspect ratio
+        (640/360 = 1.78x at 1280x720) even though kp is shared between them.
+        That asymmetry was measured in 2026-08-18-12-29-58 and -12-32-00: the
+        pitch command sat SATURATED at max_tilt in 70-73% of ALIGN samples
+        (raw demand averaging 0.077 rad against a 0.035 rad clamp) while roll
+        saturated 0-19%, which turned pitch into a relay and produced a
+        sustained 2.7-3.5 s limit cycle. Normalizing both by half_w gives the
+        two axes the same rad-per-radian gain.
+
+        Consequence: the error is +-1.0 at the LEFT/RIGHT frame edge, and only
+        +-image_height/image_width (0.5625 at 16:9) at the TOP/BOTTOM edge.
+        lateral_error_px scales BOTH back out by half_w to recover pixels.
 
         The derivative of the error is taken here, from consecutive
         detections and their real time delta, rather than in the control
@@ -630,7 +643,7 @@ class IbvsController:
         half_w = self.image_width / 2.0
         half_h = self.image_height / 2.0
         norm_x = (msg.point.x - half_w) / half_w
-        norm_y = (msg.point.y - half_h) / half_h
+        norm_y = (msg.point.y - half_h) / half_w
 
         t_x = self.image_x_sign * norm_x
         t_y = -self.image_y_sign * norm_y
@@ -805,14 +818,17 @@ class IbvsController:
         """Distance of the tracked point from the aim point, in real PIXELS,
         or None without a detection.
 
-        t_x/t_y are frame-fractions, so each is scaled back out by its own
-        half-dimension to recover a true pixel distance (the two axes have
-        different half-dimensions on a non-square frame).
+        target_callback normalizes BOTH axes by half_w (see the note there),
+        so both are scaled back out by half_w to recover pixels. Using
+        half_h for y here would under-report the vertical error by the aspect
+        ratio and silently loosen align_tolerance_px / descend_xy_gate_px on
+        that axis.
         """
         if self.t_x is None:
             return None
-        err_x = (self.target_x - self.t_x) * (self.image_width / 2.0)
-        err_y = (self.target_y - self.t_y) * (self.image_height / 2.0)
+        half_w = self.image_width / 2.0
+        err_x = (self.target_x - self.t_x) * half_w
+        err_y = (self.target_y - self.t_y) * half_w
         return (err_x ** 2 + err_y ** 2) ** 0.5
 
     def compute_thrust(self):
@@ -1038,7 +1054,7 @@ class IbvsController:
             msg.body_rate.y = pitch_rate
             msg.body_rate.z = 0.0
 
-        msg.thrust = 0.5 # thrust
+        msg.thrust = thrust
         self.setpoint_pub.publish(msg)
 
     def commanded_yaw(self, att):
