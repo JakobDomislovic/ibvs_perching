@@ -121,7 +121,7 @@ command_mode: attitude
 # standing error is genuine steady state). That eats 1.44 deg = 72% of a 2 deg
 # budget, leaving only ~0.10 m/s2 to actually manoeuvre with. Fine for a slow
 # direction-check; raise to 3-5 deg if it cannot make headway.
-max_tilt: 0.035               # [rad] desired-tilt clamp (2.0 deg)
+max_tilt: 0.05               # [rad] desired-tilt clamp (2.0 deg)
 
 # RATE mode only (ignored when command_mode is 'attitude').
 kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
