@@ -92,10 +92,22 @@ descend_xy_gate_px: 60        # [px] descend/climb only while centred within thi
 #             behaviour). Switch to this to A/B the two on the bench.
 command_mode: attitude
 
-max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg). THE key
-                              # safety limit: the vehicle can never be
-                              # commanded steeper than this, however big the
-                              # pixel error gets. Applies in BOTH modes.
+# TEST SETTING -- 2 deg. This is the SPEED limit, and the main safety knob:
+# the vehicle can never be commanded steeper than this, however big the pixel
+# error gets, so it also bounds how much damage a wrong sign can do.
+#
+#   tilt     max lateral accel    steady approach speed (g*sin(t)/c, c~0.75)
+#   1 deg        0.17 m/s2            0.23 m/s
+#   2 deg        0.34 m/s2            0.46 m/s   <-- here: ~4.4 s to cross 2 m
+#   5 deg        0.86 m/s2            1.14 m/s
+#   8.6 deg      1.47 m/s2            1.96 m/s   (the old 0.15 rad)
+#
+# CAUTION at 2 deg: the drift back-derived from the ROLL axis of
+# 2026-08-17-18-30-59.bag is ~0.25 m/s2 (that axis had the correct sign, so its
+# standing error is genuine steady state). That eats 1.44 deg = 72% of a 2 deg
+# budget, leaving only ~0.10 m/s2 to actually manoeuvre with. Fine for a slow
+# direction-check; raise to 3-5 deg if it cannot make headway.
+max_tilt: 0.035               # [rad] desired-tilt clamp (2.0 deg)
 
 # RATE mode only (ignored when command_mode is 'attitude').
 kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
@@ -144,11 +156,27 @@ max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/
 # NOT yet flight tested in this form.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.08                    # [rad per unit] tilt at the frame edge (~6.9 deg)
-  ki: 0.00                    # [rad per unit*s] trims out steady drift; without
-                              # it a constant disturbance leaves a permanent
-                              # standing error (see the table above)
-  kd: 0.00                    # [rad per unit/s] keep > 0 or it will not settle
+  # P-ONLY TEST SETTING. kp and max_tilt are INDEPENDENT knobs and it is worth
+  # not confusing them: max_tilt caps the SPEED (safety), kp sets the STANDING
+  # ERROR. Lowering kp does not make the test gentler, it only makes it less
+  # accurate -- pure P must hold err_ss = (a_drift/g)/kp to balance the drift:
+  #
+  #   kp     saturates at |err|   standing error at 0.25 m/s2 of drift
+  #   0.035        1.00 (edge)        0.72   <- target nearly leaves the frame
+  #   0.070        0.50               0.36
+  #   0.140        0.25               0.18   <- here: ~115 px in x, ~65 px in y
+  #
+  # kp 0.14 with max_tilt 0.035 means the outer 3/4 of the frame just commands
+  # a flat 2 deg and the last quarter is proportional. That is deliberate: full
+  # (slow) authority while far out, gentle as it closes.
+  kp: 0.14                    # [rad per unit] 2 deg reached at 1/4-frame error
+  ki: 0.00                    # OFF for this test. Note pure P CANNOT remove the
+                              # standing error above -- it needs a permanent
+                              # offset to generate the tilt that balances drift.
+                              # Set ~0.02 once the direction is confirmed.
+  kd: 0.00                    # OFF for this test. This is the braking term: it
+                              # is what commands tilt AWAY before arrival, so
+                              # with kd 0 expect overshoot on the way in.
   i_max: 0.05                 # [rad] max integral contribution -- this is the
                               # trim authority: 0.05 rad of tilt cancels about
                               # g*0.05 = 0.49 m/s^2 of steady disturbance, and
