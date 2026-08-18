@@ -94,7 +94,7 @@ land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 # ---------------------------------------------------------------------------
 target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
 target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
-descend_xy_gate_px: 60        # [px] descend/climb only while centred within this.
+descend_xy_gate_px: 80        # [px] descend/climb only while centred within this.
                               # Kept LARGER than align_tolerance_px so ALIGNED
                               # always implies the descent is allowed.
 
@@ -184,14 +184,14 @@ pid_xy:
   # a flat 2 deg and the last quarter is proportional. That is deliberate: full
   # (slow) authority while far out, gentle as it closes.
   kp: 0.14                    # [rad per unit] 2 deg reached at 1/4-frame error
-  ki: 0.00                    # OFF for this test. Note pure P CANNOT remove the
+  ki: 0.02                    # OFF for this test. Note pure P CANNOT remove the
                               # standing error above -- it needs a permanent
                               # offset to generate the tilt that balances drift.
                               # Set ~0.02 once the direction is confirmed.
   kd: 0.09                    # OFF for this test. This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
                               # with kd 0 expect overshoot on the way in.
-  i_max: 0.05                 # [rad] max integral contribution -- this is the
+  i_max: 0.025                 # [rad] max integral contribution -- this is the
                               # trim authority: 0.05 rad of tilt cancels about
                               # g*0.05 = 0.49 m/s^2 of steady disturbance, and
                               # bounds how far the integrator can wind up
@@ -211,11 +211,11 @@ pid_xy:
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
-align_tolerance_px: 50        # [px] target must be within this many pixels of
+align_tolerance_px: 70        # [px] target must be within this many pixels of
                               # the aim point to count as "aligned" -- the
                               # doubled tolerance, now stated in pixels
                               # directly (was 0.30 m at fx=251/depth 2.0).
                               # Exits ALIGNED at 60 px via align_hysteresis.
-align_dwell_time: 1.0         # [s] error must stay aligned this long -> ALIGNED
+align_dwell_time: 1.5         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST
