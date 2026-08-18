@@ -145,10 +145,10 @@ max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/
 # ---------------------------------------------------------------------------
 pid_xy:
   kp: 0.12                    # [rad per unit] tilt at the frame edge (~6.9 deg)
-  ki: 0.02                    # [rad per unit*s] trims out steady drift; without
+  ki: 0.00                    # [rad per unit*s] trims out steady drift; without
                               # it a constant disturbance leaves a permanent
                               # standing error (see the table above)
-  kd: 0.20                    # [rad per unit/s] keep > 0 or it will not settle
+  kd: 0.00                    # [rad per unit/s] keep > 0 or it will not settle
   i_max: 0.05                 # [rad] max integral contribution -- this is the
                               # trim authority: 0.05 rad of tilt cancels about
                               # g*0.05 = 0.49 m/s^2 of steady disturbance, and
