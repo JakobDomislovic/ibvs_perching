@@ -15,7 +15,7 @@
 # ---- CONFIG (the only things you normally change) --------------------------
 FCU_URL=/dev/ttyUSB0:921600      # mavros serial link to the flight controller
                                  # (stable alt: /dev/serial/by-id/usb-FTDI_TTL-234X-5V_FT7YLB0N-if00-port0)
-MISSION_MODE=land                # land = down cam, descend+disarm | perch = up cam, climb
+MISSION_MODE=perch                # land = down cam, descend+disarm | perch = up cam, climb
 UAV_NAMESPACE=red                # ROS namespace for mavros + ibvs
 
 BIND_PORT=5005                   # UDP port the PiOS detector sends to

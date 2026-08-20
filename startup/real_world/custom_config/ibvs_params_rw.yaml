@@ -18,33 +18,29 @@
 # Mission mode: 'land' (down cam, descend + disarm) or 'perch' (up cam, climb
 # toward the branch). Override per run from the launch (mission_mode:=perch).
 # ---------------------------------------------------------------------------
-mission_mode: land
+mission_mode: perch
 
-# Image->body sign per axis. The vision interface the controller ASSUMES is
-# point.x positive RIGHT, point.y positive DOWN (the usual top-left-origin
-# image convention). The PiOS detector does NOT use that: its frame has
-# x positive LEFT and y positive UP, so BOTH axes are inverted relative to
-# the assumption and both signs are -1.0.
+# Image->body sign per axis. The controller ASSUMES point.x positive RIGHT and
+# point.y positive DOWN (ordinary top-left-origin image convention, which the
+# PiOS detector does use). These knobs mirror the ERROR about the image centre,
+# so they set which way the vehicle leans for a given detection offset.
 #
-# These knobs mirror the ERROR about the image centre; they never move the
-# aim point, so a detection dead centre stays zero-error whatever they are.
-# Set them so a target off to one side produces a correction TOWARD it.
-# MEASURED from 2026-08-18-11-54-50.bag, both engagement windows, 104
-# detections: at -1/-1 the commanded angle pushed the error the WRONG WAY on
-# BOTH axes in 104 of 104 samples (the command sat saturated at max_tilt while
-# the error grew monotonically -- textbook positive feedback). At +1/+1 the
-# same 104 samples are correct 104/104.
+# The rule: the commanded lean must point toward where the target PHYSICALLY
+# is, not toward where it appears in the image.
 #
-# So the PiOS detector uses the ORDINARY top-left-origin convention after all
-# -- x positive RIGHT, y positive DOWN -- exactly like OpenCV and the sim.
-# The earlier -1/-1 came from inferring the convention out of bag statistics
-# (bd3313d) rather than measuring it, and that inference was wrong.
+#   LAND  down-facing camera   image_x_sign: +1.0   image_y_sign: +1.0
+#         Flight-validated: 104/104 detections correct in both engagement
+#         windows of 2026-08-18-11-54-50.bag.
 #
-# With your frames (camera +x EAST, +y SOUTH; body +x NORTH, +y WEST):
-#   err.x > 0 -> target right in image -> EAST  -> needs +roll
-#   err.y > 0 -> target down  in image -> SOUTH -> needs -pitch
-image_x_sign: 1.0             # PiOS x is positive RIGHT (as the controller assumes)
-image_y_sign: 1.0             # PiOS y is positive DOWN  (as the controller assumes)
+#   PERCH up-facing camera     image_x_sign: -1.0   image_y_sign: +1.0
+#         The same physical camera turned to face up, which inverts the x
+#         axis only. Bench-measured 2026-08-20: an ArUco held to the drone's
+#         RIGHT was detected at px=(381, 361) -- 259 px LEFT of centre, and
+#         level in y -- so image-left = drone-right. y is unchanged from LAND.
+#
+# Check any change with:  ./sim_tilt.py --sweep
+image_x_sign: -1.0            # PERCH (up cam): inverted vs LAND's +1.0
+image_y_sign: 1.0             # PERCH (up cam): unchanged from LAND
 
 # ---------------------------------------------------------------------------
 # Engagement (real world): the FCU mode is the PILOT'S. This node never
