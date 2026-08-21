@@ -6,22 +6,58 @@
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
-# NOTE: ~image_width/~image_height (the camera resolution -- the only thing
-# the controller needs to know about the camera) are NOT set here. They are
-# set ONCE, together, on all three nodes (this controller, aruco_detector.py,
-# mock_ar_tag_publisher.py) via the image_width/image_height args in
-# launch/ibvs_perching.launch, so the three can never drift out of sync.
+# ---------------------------------------------------------------------------
+# Mission mode -- what the vertical axis does once centered on the target.
+#   land   down-facing camera, target below: descend onto it then DISARM.
+#          Open-rate descent; the terminal disarm uses odometry altitude.
+#   perch  up-facing camera, branch above: climb toward it while centered.
+#          Range is ignored; the safety pilot commits the final grab.
+# Override per run from the launch (mission_mode:=perch).
+# ---------------------------------------------------------------------------
+mission_mode: land
+
+# Image->body sign per axis. The controller's vision interface assumes the
+# usual top-left-origin image convention: point.x positive RIGHT, point.y
+# positive DOWN.
+#
+# THIS IS THE SIMULATION CONFIG. aruco_detector.py publishes OpenCV's own
+# (u, v) from detectMarkers -- u right, v down, top-left origin -- which
+# already MATCHES that assumption, so both signs are +1.0 here.
+#
+# Do NOT copy the real-world values: the PiOS detector uses x positive LEFT
+# and y positive UP, so custom_config/ibvs_params_rw.yaml needs -1.0/-1.0.
+# The two setups genuinely differ; that mismatch is why the real aircraft
+# drove away from the tag while the simulation converged.
+#
+# These knobs mirror the ERROR about the image centre and never move the aim
+# point, so a detection dead centre stays zero-error whatever they are.
+image_x_sign: 1.0             # sim: OpenCV u is positive RIGHT (as assumed)
+image_y_sign: 1.0             # sim: OpenCV v is positive DOWN  (as assumed)
+
+# PERCH: constant climb-rate command while centered on the branch above
+# (> hover_thrust climbs; clamped to thrust_max).
+perch_climb_thrust: 0.55
+
+# LAND: constant slow descent while centered (< hover_thrust descends;
+# clamped to thrust_min). There is no range sensor -- the descent is
+# open-rate and the terminal disarm uses odometry altitude.
+land_descend_thrust: 0.45
+
+# LAND: touchdown -> disarm once centered (within descend_xy_gate) and below
+# land_disarm_height, held for land_disarm_dwell seconds (debounce). Set
+# disarm_on_land false to descend-and-hold instead of cutting the motors.
+disarm_on_land: true
+land_disarm_height: 0.15      # [m] odometry altitude below which disarm triggers
+land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 
 # ---------------------------------------------------------------------------
 # Mid-flight engagement (fly manually with the keyboard joystick, then let
-# IBVS take over). engage_on_target lets the controller seize GUIDED_NOGPS
-# itself on a fresh ibvs/target_point; engage_needs_start gates that behind
-# an ibvs/start call first ('i' on the keyboard joystick, a real joystick
-# button later) so seeing the tag alone never grabs control. The classic
-# service mission (ibvs/takeoff -> ibvs/start) is unaffected.
+# IBVS take over). engage_on_target lets the controller skip CLIMB and servo
+# straight away once it is armed and in GUIDED_NOGPS. It does NOT switch the
+# mode: the PILOT selects GUIDED_NOGPS, and ibvs/start enables servoing.
+# The classic service mission (ibvs/takeoff -> ibvs/start) is unaffected.
 # ---------------------------------------------------------------------------
 engage_on_target: true
-engage_needs_start: true
 
 # ---------------------------------------------------------------------------
 # Z axis -- climb rate through the AttitudeTarget "thrust" field.
@@ -30,6 +66,8 @@ engage_needs_start: true
 # (unless GUID_OPTIONS bit 3 is set):
 #   0.0 = max descent, 0.5 = zero climb rate (hover), 1.0 = max climb.
 # Takeoff therefore REQUIRES a value above 0.5 -- that is climb_thrust.
+# There is NO range sensor: the vertical axis is open-rate (see
+# land_descend_thrust / perch_climb_thrust above), not target-relative.
 # ---------------------------------------------------------------------------
 hover_thrust: 0.5             # zero-climb-rate ("hover") command
 climb_thrust: 0.52            # sent during CLIMB -> this is what makes it take off
@@ -37,67 +75,92 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] CLIMB ends when odometry z reaches this
 
-# No depth from the vision module -> no standoff to regulate toward, and
-# FOR NOW no depth-free descent strategy is enabled either: ALIGN/ALIGNED
-# hold the ODOMETRY height the vehicle was at when servoing started
-# (latched in transition(), NOT takeoff_height), regulated below rather
-# than trusting an open-loop hover_thrust to hold still. Centering the
-# target laterally does not by itself bring the vehicle any closer to it
-# (see README limitations for what adding descent back would take).
-kp_alt_hold: 0.3               # thrust delta per meter of height error
-kv_alt_hold: 0.2               # thrust delta per m/s of climb-rate damping
-
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the target's pixel error, expressed
-# as a FRACTION of the half-frame (0 = centered, +-1 = frame edge; see
-# target_callback in ibvs_controller.py), in the body FLU frame convention
-# (x-forward, y-left, z-up):
-#   desired_tilt = PID_xy(frame-fraction error)       (clamped to max_tilt)
+# X-Y axis -- CASCADE on the image error, with an IMU attitude inner loop:
+#   desired_tilt = PID_xy(error)                     (clamped to max_tilt)
 #   body_rate    = kp_att * (desired_tilt - current_tilt)
-# A raw rate command proportional to position error is UNSTABLE (the rate
-# integrates into an unbounded tilt); the attitude inner loop is required.
+# The error is the detection's offset from centre, normalized per axis by its
+# own half-dimension, so it is +-1.0 at that axis' frame edge. No fx/fy, no
+# depth_guess, NO CAMERA CALIBRATION anywhere in the chain.
+# ~image_width / ~image_height come from ibvs_perching.launch (640x480 for the
+# sim camera) so they cannot drift from the resolution the detector reports.
+#
+# Attitude comes from mavros/imu/data (the FCU's AHRS) -- no position solution
+# needed, so the same code path works in sim and on the real aircraft.
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
-target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+descend_xy_gate_px: 60        # [px] descend only while centred within this radius
+                              # (keeps the tag inside the shrinking camera FOV).
+                              # Kept LARGER than align_tolerance_px so ALIGNED
+                              # always implies the descent is allowed.
 
-max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
-kp_att: 1.5                   # body rate per rad of attitude error [1/s]
-max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s)
-kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]; HOVER and
-                              # TAG_LOST hold the latched spot (takeoff point /
-                              # wherever servoing stopped) -- level attitude
-                              # alone drifts away on attitude trim bias
-kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
-                              # (kp_alt_hold/kv_alt_hold above are the Z-axis
-                              # equivalent, for ALIGN/ALIGNED's height hold)
+# How the desired tilt is sent to the FCU:
+#   attitude  publish the target ATTITUDE quaternion, ArduPilot closes the
+#             attitude loop itself (400 Hz, tuned ATC_* gains).
+#   rate      publish a body rate from our own kp_att loop (previous
+#             behaviour), for A/B comparison.
+command_mode: attitude
+
+max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg). THE key
+                              # safety limit: never commanded steeper than
+                              # this. Applies in BOTH modes.
+
+# RATE mode only (ignored when command_mode is 'attitude').
+kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
+max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s).
+                              # Keep >= kp_att * max_tilt (= 0.225 here).
 
 # ---------------------------------------------------------------------------
-# PID gains. I and D start at 0 (pure P) -- raise them only when tuning.
-# The D-term uses body velocity from odometry as a damping proxy -- with a
-# metric error this was an EXACT derivative; with a frame-fraction error
-# (no depth) it's only approximate, since the same velocity produces a
-# bigger apparent pixel motion the closer the vehicle is to the target.
+# OUTER-loop PID gains. UNITS: kp is rad of TILT per unit frame-fraction, so
+# kp IS the tilt commanded at the frame edge (kp 0.10 => 5.7 deg there). A
+# TILT, not a rate -- the inner attitude loop turns it into one.
+#
+# These suit the SIM detector's 15 Hz (aruco_detector ~process_rate), i.e. a
+# ~0.067 s gap between detections. Gains tolerable here are NOT safe on the
+# real aircraft, whose detector measures 3.8-5.9 Hz (median gap 0.157 s) --
+# overshoot grows sharply as detection rate drops, so the real-world config
+# uses gentler values. See the measured table in
+# startup/real_world/custom_config/ibvs_params_rw.yaml.
+#
+# The D term differentiates the DETECTION (there is no body-velocity estimate
+# in the real-world setup, so the same source is used in both). With the
+# cascade, kd=0 no longer DIVERGES the way the old bare-rate law did, but it
+# still oscillates without settling -- keep kd non-zero.
 # i_max bounds the INTEGRAL CONTRIBUTION (anti-windup), not the raw sum.
-# Values below carried over numerically from the old metric gains as a
-# STARTING POINT ONLY -- the error is now dimensionless (roughly -1..1
-# instead of unbounded meters), so these need retuning by flying it.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.15                    # desired tilt per unit of frame-fraction error [rad]
-  ki: 0.002                   # [rad/s]
-  kd: 0.15                    # [rad per unit/s] -- damps the X-Y approach so it
-                              # doesn't oscillate (flight-tested with descent
-                              # enabled; kept as the starting point)
-  i_max: 0.05                 # [rad] max integral contribution
+  kp: 0.10                    # [rad per unit] tilt at the frame edge (~5.7 deg)
+  ki: 0.02                    # [rad per unit*s] trims out steady drift. A pure-P
+                              # outer loop must hold a standing error of
+                              # (a_dist/g)/kp to balance any constant
+                              # disturbance -- flight-visible in
+                              # 2026-08-17-18-30-59.bag, see the real-world
+                              # config for the numbers.
+  kd: 0.15                    # [rad per unit/s] keep > 0 or it will not settle
+  i_max: 0.05                 # [rad] max integral contribution = trim authority
+                              # (~0.49 m/s^2 of disturbance) and anti-windup bound
+  d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
+  d_max_dt: 0.20              # [s] longest detection gap still differentiated;
+                              # beyond it the D term is zeroed instead of
+                              # computed across the gap. ~3x the sim's 0.067 s
+                              # detection gap, so D survives normal frames and
+                              # is only dropped across a genuine stall. (Keep
+                              # this comfortably ABOVE the actual gap or kd
+                              # goes inert -- that is what happened in the
+                              # real-world config, see ibvs_params_rw.yaml.)
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback timeout if takeoff_height is never reached
-align_tolerance_px: 20         # [px] target must be within this many pixels of
-                              # center to count as "aligned" -- retune by flying it
+align_tolerance_px: 40        # [px] target must be within this many pixels of
+                              # the aim point to count as "aligned" -- the
+                              # doubled tolerance, stated in pixels directly.
+                              # Exits ALIGNED at 60 px via align_hysteresis.
 align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no tag message within this time -> TAG_LOST
-                              # (short: at 30 fps detection, 0.5 s of silence
-                              # is a real loss, not a dropped frame)
+                              # (short: at 30 fps detection, 0.5 s of silence is
+                              # a real loss, and stale-data descent near the
+                              # ground must stop quickly)

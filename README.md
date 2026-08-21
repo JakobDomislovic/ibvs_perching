@@ -73,7 +73,7 @@ Key decisions and their rationale:
 | Publish to `mavros/setpoint_raw/attitude` | Lowest-level setpoint interface MAVROS offers for guided flight: body rates + thrust/climb-rate, mapped to the MAVLink `SET_ATTITUDE_TARGET` message. |
 | Z axis via climb rate, hover at `0.5` | ArduPilot interprets the `thrust` field as a climb-rate command in guided modes (see §2), giving us a well-damped, firmware-stabilized vertical channel for free. |
 | Modal (state machine) design | Perching is inherently phased: take off, acquire the tag, align, hold. Explicit states make the behavior predictable, debuggable (`ibvs/state` topic), and safe (dedicated `TAG_LOST` and disarm handling). |
-| Separate mock detector node | The controller only sees a `PointStamped` on `ibvs/target_point`. Swapping the mock for a real detector requires zero controller changes. |
+| Separate mock detector node | The controller only sees a `PoseStamped` on `ibvs/tag_pose`. Swapping the mock for a real detector requires zero controller changes. |
 
 ## 2. How ArduPilot interprets the setpoint (READ THIS)
 
@@ -127,19 +127,19 @@ body-rate control; see `ArduCopter/mode_guided.cpp`.)
 
 ```
    camera/color/image_raw ---> +--------------------------+
-   (down-facing camera,        |      VISION MODULE       |   (aruco_detector.py today;
-    no calibration needed)     | detects "the point" in   |    mock_ar_tag_publisher.py
+   camera/color/camera_info    |      VISION MODULE       |   (aruco_detector.py today;
+   (down-facing camera)        | detects "the point" in   |    mock_ar_tag_publisher.py
                                | the image                |    with use_mock_tag:=true;
                                +-----------+--------------+    your own node tomorrow)
                                            | ibvs/target_point (PointStamped:
-                                           |  x,y = target pixel u,v,
-                                           |  0..image_width/height; no depth)
+                                           |  x,y = normalized offset from the
+                                           |  image center; z = distance or 0)
                                            v
    mavros/state ------------->  +--------------------------+
    (armed? GUIDED_NOGPS?)       |     ibvs_controller      |--> ibvs/state (String, latched)
    mavros/local_position/odom ->|  modal state machine +   |
-   (attitude, velocity, height) |  PID cascade on pixel    |--> mavros/setpoint_raw/attitude
-                                |  error (frame-fraction)  |    (AttitudeTarget @ control_rate)
+   (attitude, velocity, height) |  PID cascade on image    |--> mavros/setpoint_raw/attitude
+                                |  point error             |    (AttitudeTarget @ control_rate)
                                 +--------------------------+         |
                                                                      v
                                                     MAVROS -> ArduPilot (SET_ATTITUDE_TARGET)
@@ -152,52 +152,47 @@ topic names above are relative (`/red/ibvs/target_point`, etc).
 
 The controller never knows *what* is being tracked — it centers a point in
 the camera image. Any node that publishes
-`ibvs/target_point` (`geometry_msgs/PointStamped`) is a valid vision module,
-and **needs no camera calibration** — a plain object detector that only
-knows a pixel center is enough:
+`ibvs/target_point` (`geometry_msgs/PointStamped`) is a valid vision module:
 
 | Field | Meaning |
 |---|---|
-| `point.x` | target pixel column (`u`), `0 .. image_width` |
-| `point.y` | target pixel row (`v`), `0 .. image_height` |
-| `point.z` | unused, always `0.0` — **there is no depth** |
+| `point.x` | normalized horizontal offset from the image center: `(u − cx)/fx`, positive **right** |
+| `point.y` | normalized vertical offset: `(v − cy)/fy`, positive **down** |
+| `point.z` | distance to the target along the optical axis [m], **`0.0` if unknown** |
 
 Rules:
 
 - **Publish only while the target is detected.** Fresh messages are what
   flips the state to `TAG_IN_SIGHT` (and keeps `ALIGN` alive); silence for
   `tag_timeout` means the target is gone.
-- The controller's `~image_width`/`~image_height` must be set to the SAME
-  resolution the vision module is using (set once, together, via
-  `launch/ibvs_perching.launch`'s `image_width`/`image_height` args) so it
-  can find the frame center.
-- **No depth means no metric standoff.** The controller cannot know how far
-  away the target is. **For now** `ALIGN`/`ALIGNED` only center the point
-  laterally and hold `hover_thrust` — no descent at all yet, see §5.
-- The camera is assumed rigidly mounted looking straight **down**, with
-  image **right = body forward** (the kopterworx `down_facing_camera`
-  mount). A point right-of-center in the image is to the right of the
-  vehicle.
+- `point.z` is **ignored** — there is no range sensor. The vertical axis is
+  open-rate: a fixed slow descent (`land`) or climb (`perch`) while laterally
+  centred, gated by `descend_xy_gate_px`.
+- The horizontal image error drives **roll** and the vertical error drives
+  **pitch** (image right = body *right*). This is 90° from the original
+  kopterworx `down_facing_camera` assumption (image right = body *forward*);
+  per-axis polarity is set by `image_x_sign` / `image_y_sign`.
 
 ### The AR-tag simulation setup (`ar_tag` branch)
 
 | Piece | What / where |
 |---|---|
 | Tag model | `models/ar_tag/` — 20×20 cm ArUco marker (`DICT_4X4_50`, id 0) on a 30×30 cm white plate (5 cm quiet zone), spawned flat on the floor at the **world origin** by `ibvs_perching.launch` |
-| Camera | kopterworx down-facing RGB camera, 640×480 @ 30 fps, 80° HFOV, on `camera/color/image_raw` (no `camera_info`/calibration needed — pixel-only interface); detection throttled to 15 Hz |
-| Camera mount | `urdf/kopterworx_downcam.urdf.xacro` — a copy of the stock kopterworx xacro with `down_facing_camera` moved to `xyz="0 0 -0.05"` (the stock mount hangs 0.3 m below / 0.2 m left, which would touch the tag at low altitude and push it out of frame) |
+| Camera | kopterworx down-facing RGB camera, 640×480 @ 30 fps, 80° HFOV, on `camera/color/image_raw` + `camera_info`; detection throttled to 15 Hz |
+| Camera mount | `urdf/kopterworx_downcam.urdf.xacro` — a copy of the stock kopterworx xacro with `down_facing_camera` moved to `xyz="0 0 -0.05"` (the stock mount hangs 0.3 m below / 0.2 m left, which would touch the tag at the target altitude and push it out of frame during descent) |
 | Vision module | `scripts/aruco_detector.py` — publishes `ibvs/target_point`, see the interface above |
-| Mission profile | `ibvs/takeoff` climbs to **2 m** (`takeoff_height`), holds; when `ibvs/state` shows **`TAG_IN_SIGHT`**, `ibvs/start` centers the point in the camera and holds **whatever height the vehicle was at when `ibvs/start` was called** (usually ≈2 m, but not tied to `takeoff_height` — see §5) — **no descent yet** (§11), the mission currently ends at centered-and-hovering |
+| Mission profile | `ibvs/takeoff` climbs to **2 m** (`takeoff_height`), holds; when `ibvs/state` shows **`TAG_IN_SIGHT`**, `ibvs/start` centers the point in the camera and then descends at a fixed slow rate (`land_descend_thrust`) while it stays centred |
 | Spawn point | UAV starts at `(1, 0)`, 1 m from the tag, so the alignment maneuver is visible |
 | Signals | `config/plotjuggler_ibvs.xml` — PlotJuggler layout with the commanded body rates, thrust/climb-rate, tag error and altitude (pre-typed in the `visualization` window) |
 
 **Detection floor:** the full marker must be inside the image for ArUco to
 detect it. With the 80°(H)/61°(V) FOV and the camera 5 cm below the base,
-the 20 cm marker fills the vertical FOV at roughly **0.25 m** altitude —
-not currently relevant at the 2 m takeoff height since the controller
-doesn't descend yet (§11), but worth knowing before re-enabling descent. If
-detection flickers, the controller degrades gracefully (`TAG_LOST` =
-position hold, re-`ALIGN` on re-detection).
+the 20 cm marker fills the vertical FOV at roughly **0.25 m** altitude, so
+the 0.3–0.5 m standoff stays comfortably detectable. If detection flickers,
+the controller degrades gracefully (`TAG_LOST` = position hold, re-`ALIGN`
+on re-detection). The **descend gate** (`descend_xy_gate_px`) additionally
+refuses to descend while laterally off-center, which is what keeps the tag
+inside the shrinking FOV on the way down.
 
 ## 4. The state machine
 
@@ -221,8 +216,8 @@ position hold, re-`ALIGN` on re-detection).
 | `CLIMB` | takeoff: climbing to `takeoff_height` | position hold (takeoff point) | `climb_thrust` (**> 0.5 → the vehicle lifts off**) |
 | `HOVER` | holding, tag NOT visible — `ibvs/start` would go to `TAG_LOST` | position hold | `hover_thrust` (hold altitude) |
 | `TAG_IN_SIGHT` | holding, **detector sees the tag** — call `ibvs/start` now | position hold | `hover_thrust` (hold altitude) |
-| `ALIGN` | closed-loop X-Y servoing; Z holds altitude (no descent yet) | PID on pixel error | regulated toward `hold_height` |
-| `ALIGNED` | error small & settled — hold | PID on pixel error | regulated toward `hold_height` |
+| `ALIGN` | closed-loop X-Y servoing + Z standoff regulation | PID on tag error | PID on tag height (+ descend gate) |
+| `ALIGNED` | error small & settled — hold | PID on tag error | PID on tag height (+ descend gate) |
 | `TAG_LOST` | detection lost while servoing | position hold | `hover_thrust` (hold altitude) |
 
 `HOVER` ↔ `TAG_IN_SIGHT` flip automatically with detection; both hold the
@@ -241,10 +236,11 @@ Arming the FCU yourself (e.g. `mavros/cmd/arming`) no longer triggers a
 climb — only `ibvs/takeoff` does. To restore the old one-shot behavior
 (takeoff flows straight into alignment) set `~auto_start: true`.
 
-The attitude inner loop (desired tilt → body rate, see §5) is active in
-**every** flying state: with `IGNORE_ATTITUDE` set, a zero body-rate command
-means "keep the current tilt", not "fly level" — so "hold" states command
-*level attitude*, never zero rates.
+A **desired tilt** is commanded in every flying state (see §5), never a bare
+zero rate: with `IGNORE_ATTITUDE` set, a zero body-rate command means "keep
+the current tilt", not "fly level" — so "hold" states command *level
+attitude*. In the default `attitude` command mode this is unambiguous, since
+a level quaternion means exactly that.
 
 Safety properties baked in:
 
@@ -262,85 +258,78 @@ transition.
 
 ## 5. Control laws
 
-No depth is available (see §3) — the vision module gives only a pixel
-center. `target_callback` converts it to `(t_x, t_y)`, the target's offset
-from the frame center **as a fraction of the half-frame** (`0` = centered,
-`±1` = the frame edge), against targets `(target_x, target_y)` (default
-`0, 0`):
+The image error is the detection's offset from the frame centre, normalized
+per axis by its own half-dimension, so it is ±1.0 at that axis' frame edge —
+no intrinsics, no depth (see §3).
 
-```python
-norm_x = (point.x - image_width  / 2) / (image_width  / 2)
-norm_y = (point.y - image_height / 2) / (image_height / 2)
-t_x, t_y = norm_x, -norm_y   # body FLU sign convention
-```
-
-**X-Y — a cascade, not a direct rate law.** A body-rate command directly
-proportional to position error is **unstable**: the commanded rate integrates
-into an ever-growing tilt with no attitude feedback (flight-tested in SITL —
-the vehicle oscillated laterally, flipped, and ArduPilot's crash check
-disarmed it). The stable structure is two nested proportional loops that
-still output body rates — structurally unchanged from before, just fed a
-frame-fraction error instead of a metric one:
+**X-Y — command a TILT, not a rate.** A body-rate command directly
+proportional to the error is **unstable**: the commanded rate integrates into
+an ever-growing tilt with no attitude feedback (flight-tested in SITL — the
+vehicle oscillated laterally, flipped, and ArduPilot's crash check disarmed
+it; flight-tested again on the real aircraft, where it overshot every time).
+The outer loop therefore produces a bounded *attitude*:
 
 ```
-# outer loop: PID on the frame-fraction error -> desired tilt (small!)
-desired_pitch = PID_x( error=t_x - target_x, error_dot=-v_x )   # clamped ±max_tilt
-desired_roll  = PID_y( error=target_y - t_y, error_dot=+v_y )   # clamped ±max_tilt
-
-# inner loop: attitude error -> body rate (runs in ALL flying states)
-body_rate.y = clamp( kp_att * (desired_pitch - pitch), ±max_body_rate )
-body_rate.x = clamp( kp_att * (desired_roll  - roll),  ±max_body_rate )
+# outer loop: PID on the image error -> desired tilt, clamped ±max_tilt
+#   HORIZONTAL image error drives ROLL, VERTICAL drives PITCH
+#   (this camera is mounted 90° from the original image-right = body-forward
+#    assumption; per-axis polarity is image_x_sign / image_y_sign)
+desired_roll  = PID_x( error=-err_x, error_dot=+t_x_dot )   # clamped ±max_tilt
+desired_pitch = PID_y( error=+err_y, error_dot=-t_y_dot )   # clamped ±max_tilt
 ```
+
+How that tilt reaches the FCU is `~command_mode`:
+
+```
+attitude (default)   publish the target ATTITUDE quaternion; ArduPilot closes
+                     the attitude loop itself at 400 Hz with its tuned ATC_*
+                     gains. type_mask ignores the three rate fields. The
+                     quaternion must be NON-ZERO — Copter-Larics-4.3.3 reads
+                     an all-zero quaternion as "use body rates" (§2). Yaw is
+                     latched from the IMU on ALIGN entry and held, since a
+                     quaternion always carries one.
+
+rate                 our own inner loop, kept for bench A/B:
+                       body_rate.x = clamp(kp_att*(desired_roll  - roll ), ±max_body_rate)
+                       body_rate.y = clamp(kp_att*(desired_pitch - pitch), ±max_body_rate)
+                     Also the automatic fallback before the first IMU message.
+```
+
+Attitude feedback comes from `mavros/imu/data` (the FCU's AHRS) — it needs no
+position solution, so it works with no GPS and no OptiTrack.
+`mavros/local_position/odom` requires an EKF *position* fix and never
+publishes in the real-world setup; it is read only for altitude.
 
 Each `PID` is a standard `kp·e + ki·∫e + kd·ė` with output clamping and
 integral anti-windup (`i_max` bounds the integral *contribution*). **I and D
 gains default to 0** — the shipped tuning is pure P. The derivative input is
-the body-frame velocity from odometry, used as a damping proxy — for a
-*metric* error this was an **exact** derivative (`d(error)/dt = ∓velocity`
-for a stationary target); for the frame-fraction error it is only an
-**approximation**, since the same velocity produces a bigger apparent pixel
-motion the closer the vehicle is to the target — a scaling that came for
-free with a real depth measurement and cannot be corrected without one.
-Setting `kd` > 0 still meaningfully damps the approach (`kd ≈ 0.15` is the
-shipped starting point) but expect to retune it.
+the body-frame velocity from odometry (for a stationary tag,
+`d(error)/dt = ∓velocity`) rather than a numerical derivative of the
+detection — same signal, far less noise. Setting `kd` > 0 reproduces the
+velocity-damping cascade (`kd ≈ 0.25` was flight-tested and smooths the
+approach).
 
 `v_x, v_y` are body-frame velocities and `roll, pitch` the current attitude,
 both from `mavros/local_position/odom`. Sign conventions (body FLU, ROS euler
 angles): **+pitch = nose down = +x acceleration; +roll = right side down =
-−y acceleration** — hence the error signs above (fly *toward* the target:
+−y acceleration** — hence the error signs above (fly *toward* the tag:
 `t_x > target` → pitch down; `t_y > target` → roll left).
 
-**Z (ALIGN / ALIGNED) — holds altitude, for now.** With no depth there is
-nothing to regulate a standoff against, and no depth-free descent strategy
-is enabled yet either. Instead of trusting an open-loop `hover_thrust` to
-hold still, the controller latches the odometry height **at the moment
-servoing starts** (entering `ALIGN` — i.e. wherever the vehicle actually
-was when `ibvs/start` was called, not `takeoff_height`) and regulates
-toward it, same P + velocity-damping structure as the X-Y position hold
-above:
+**Z (ALIGN / ALIGNED):** open-rate, because there is no range sensor and no
+depth in the vision interface — there is nothing to regulate a standoff
+against:
 
-```python
-# hold_height latched once, in transition(), on entering ALIGN:
-#   hold_height = odom.z
-z_err = hold_height - odom.z
-thrust = hover_thrust + clamp(kp_alt_hold * z_err - kv_alt_hold * v_z,
-                              thrust_min - hover_thrust, thrust_max - hover_thrust)
+```
+centred (within descend_xy_gate_px)?
+    land  -> thrust = land_descend_thrust   (< 0.5, slow descent)
+    perch -> thrust = perch_climb_thrust    (> 0.5, slow climb)
+off-centre, or any hold state
+          -> thrust = hover_thrust          (0.5, hold altitude)
 ```
 
-This matters most for the `engage_on_target` real-world flow (§12), where
-`CLIMB` never runs at all — the vehicle is already airborne wherever the
-safety pilot flew it, and `hold_height` is the only thing anchoring
-altitude once `ALIGN` takes over. In the sim service flow it also guards
-against drift accumulated during an arbitrarily long wait in `HOVER`
-before `ibvs/start` is finally called.
-
-Centering the target laterally does not by itself bring the vehicle any
-closer to it — `ALIGN`/`ALIGNED` currently mean "centered and holding,"
-not "descending toward the target." An earlier iteration of this
-controller had a depth-free open-loop descent ramp here (thrust stepping
-down from `hover_thrust` while centered, gated by lateral error and a
-minimum-altitude safety floor) — removed for now, see §11 for the idea if
-it's worth reviving.
+`land` then ends by disarming on touchdown (`land_disarm_height`, from
+odometry altitude); `perch` has no automatic terminal — the safety pilot
+commits the grab.
 
 **Z (CLIMB):** constant `climb_thrust` — this doubles as the takeoff.
 
@@ -352,9 +341,14 @@ it's worth reviving.
 |---|---|---|---|
 | sub | `mavros/state` | `mavros_msgs/State` | armed flag + flight mode |
 | sub | `ibvs/target_point` | `geometry_msgs/PointStamped` | the vision-module interface (see §3) |
-| sub | `mavros/local_position/odom` | `nav_msgs/Odometry` | attitude + body velocity for the cascade |
+| sub | `mavros/imu/data` | `sensor_msgs/Imu` | AHRS attitude — needs no position fix, so it works with no GPS/OptiTrack |
+| sub | `mavros/local_position/odom` | `nav_msgs/Odometry` | **altitude only** (takeoff height, landing disarm); never publishes without an EKF position fix |
 | pub | `mavros/setpoint_raw/attitude` | `mavros_msgs/AttitudeTarget` | at `control_rate` |
 | pub | `ibvs/state` | `std_msgs/String` | latched, on transitions |
+| pub | `ibvs/error` | `geometry_msgs/PointStamped` | pixel error `detection − centre`; published **per detection**, so it goes silent when the detector stalls |
+| pub | `ibvs/pid_roll` | `geometry_msgs/PointStamped` | **debug**, rad: `x`=P, `y`=I, `z`=D term of the roll PID, *before* the `max_tilt` clamp |
+| pub | `ibvs/pid_pitch` | `geometry_msgs/PointStamped` | **debug**, rad: same for the pitch PID |
+| pub | `ibvs/control_angles` | `geometry_msgs/PointStamped` | **debug**, rad: `x`=α roll, `y`=β pitch, `z`=γ yaw — the attitude actually commanded, *after* the clamp |
 
 Parameters (all private, loaded from
 [`config/ibvs_params.yaml`](config/ibvs_params.yaml)):
@@ -362,60 +356,63 @@ Parameters (all private, loaded from
 | Param | Default | Meaning |
 |---|---|---|
 | `control_rate` | `20.0` | setpoint publish rate [Hz] |
-| `image_width` / `image_height` | `640` / `480` | camera resolution — the only thing the controller needs to know about the camera. Set together with the vision module via `launch/ibvs_perching.launch`'s args, not this file |
 | `hover_thrust` | `0.5` | zero-climb-rate command |
 | `climb_thrust` | `0.6` | climb command during `CLIMB` (**must be > 0.5 to take off**) |
 | `thrust_min` / `thrust_max` | `0.35` / `0.7` | clamp on the Z command |
 | `takeoff_height` | `2.0` | `CLIMB` ends when odometry z reaches this [m] |
-| `kp_alt_hold` | `0.3` | altitude-hold P outside CLIMB [thrust/m]; `ALIGN`/`ALIGNED` hold `hold_height`, the odometry height latched when servoing started (§5) — **not** `takeoff_height` |
-| `kv_alt_hold` | `0.2` | climb-rate damping for the altitude hold [thrust per m/s] |
-| `target_x` / `target_y` | `0.0` | desired lateral offset, frame-fraction (0 = centered) |
-| `pid_xy/kp` | `0.1` | desired tilt per unit of frame-fraction error [rad] — retune from the metric-era default, units changed |
-| `pid_xy/ki` | `0.0` | integral gain (0 = off; a small value removes the trim-bias droop) |
-| `pid_xy/kd` | `0.15` | derivative gain; acts on body velocity as an approximate damping proxy (no longer an exact derivative without depth, see §5) |
-| `pid_xy/i_max` | `0.05` | anti-windup clamp on integral contribution [rad] |
-| `max_tilt` | `0.15` | desired-tilt clamp [rad] (~8.5°) |
-| `kp_att` | `1.5` | body rate per rad of attitude error [1/s] |
-| `max_body_rate` | `0.35` | roll/pitch rate clamp [rad/s] (~20 °/s) |
-| `kp_hover` | `0.15` | position-hold P outside ALIGN [rad/m]; `HOVER`/`TAG_LOST` hold a latched position (the takeoff point, or wherever servoing stopped). Level attitude alone drifts away on attitude trim bias (flight-tested ~0.1 m/s) |
-| `kv_hover` | `0.25` | velocity damping for the position hold [rad per m/s] |
+| `mission_mode` | `land` | `land` (down cam: descend onto the target, then disarm) or `perch` (up cam: climb toward the branch) |
+| `image_width` / `image_height` | from launch | camera resolution — the **only** camera knowledge needed. Set on the controller *and* the vision module together, from the launch file |
+| `image_x_sign` / `image_y_sign` | `+1` sim, `−1` real | per-axis image→body polarity; absorbs the detector's pixel-sign convention. Sim (`aruco_detector`, OpenCV `u/v`) needs `+1/+1`; the PiOS detector needs `−1/−1` |
+| `command_mode` | `attitude` | `attitude` = publish the target quaternion, ArduPilot closes the attitude loop; `rate` = our own `kp_att` inner loop (bench A/B) |
+| `target_x` / `target_y` | `0.0` | desired lateral offset as a frame-fraction (`0` = dead centre) |
+| `pid_xy/kp` | `0.12` real, `0.10` sim | **tilt** commanded at the frame edge [rad per unit of frame-fraction] |
+| `pid_xy/ki` | `0.02` | integral gain — without it a steady disturbance leaves a permanent standing error of `(a_dist/g)/kp` (flight-visible, §5) |
+| `pid_xy/kd` | `0.20` real, `0.15` sim | derivative gain on the differentiated detection; keep > 0 or it oscillates without settling |
+| `pid_xy/i_max` | `0.05` | anti-windup clamp on the integral **contribution** [rad] — also the trim authority (~0.49 m/s² of disturbance) |
+| `pid_xy/d_filter` | `0.15` | EMA on the differentiated detection (`1.0` = off) |
+| `pid_xy/d_max_dt` | `0.40` real, `0.20` sim | longest detection gap still differentiated [s]. **Must stay well above the real inter-arrival gap** — at `0.15` against a measured median of `0.157` the D term was discarded on ~92% of detections |
+| `descend_xy_gate_px` | `60` | landing/perching funnel: move vertically only while within this many pixels of the aim point — going off-centre loses the tag from the shrinking FOV (flight-tested) |
+| `max_tilt` | `0.15` | desired-tilt clamp [rad] (~8.5°) — the key safety limit, applies in both command modes |
+| `kp_att` | `1.5` | **rate mode only**: body rate per rad of attitude error [1/s] |
+| `max_body_rate` | `0.35` | **rate mode only**: roll/pitch rate clamp [rad/s] (~20 °/s). Keep ≥ `kp_att × max_tilt` |
+| `disarm_on_land` | `true` | `land` mode: cut motors on touchdown. Needs odometry altitude, which the real-world setup does not have — it warns instead of failing silently |
+| `land_disarm_height` / `land_disarm_dwell` | `0.15` / `0.3` | touchdown altitude [m] and debounce [s] |
 | `auto_start` | `false` | skip the `ibvs/start` gate: takeoff flows straight into ALIGN |
 | `climb_settle_time` | `10.0` | `CLIMB` fallback timeout if `takeoff_height` is never reached [s] |
-| `align_tolerance_px` | `20` | X-Y pixel-space distance from center considered aligned [px] — retune by flying it |
+| `align_tolerance_px` | `40` | pixel distance from the aim point considered aligned [px] |
 | `align_dwell_time` | `2.0` | time within tolerance before `ALIGNED` [s] |
 | `align_hysteresis` | `1.5` | tolerance multiplier to leave `ALIGNED` |
 | `tag_timeout` | `0.5` | detection staleness threshold [s] |
 
 ### `aruco_detector.py` (the shipped vision module)
 
-Detects the ArUco marker with `cv2.aruco` and publishes its **pixel-plane
-center** on `ibvs/target_point` (see the interface in §3) — no camera
-intrinsics or calibration used at all, `point.x/y` are exactly the marker's
-detected pixel `(u, v)`. `point.z` is always `0.0`: `marker_length` is kept
-only because ArUco needs *some* marker size to run detection, but no depth
-is estimated or published.
+Detects the ArUco marker with `cv2.aruco` and publishes its **image-plane
+center** on `ibvs/target_point` (see the interface in §3). `point.x/y` come
+straight from the marker's pixel center and the intrinsics (exact even if
+`marker_length` is miscalibrated); `point.z` is the depth estimated from the
+known marker size.
 
 | Interface | Name | Type |
 |---|---|---|
 | sub | `camera/color/image_raw` | `sensor_msgs/Image` |
+| sub | `camera/color/camera_info` | `sensor_msgs/CameraInfo` |
 | pub | `ibvs/target_point` | `geometry_msgs/PointStamped` (vision interface) |
 | pub | `ibvs/debug_image` | `sensor_msgs/Image` (detections drawn; only rendered when subscribed — `rqt_image_view` is pre-typed in the visualization window) |
 
 | Param | Default | Meaning |
 |---|---|---|
 | `~marker_id` | `0` | ArUco id to accept |
+| `~marker_length` | `0.20` | marker side [m] — only affects the `point.z` depth hint |
 | `~process_rate` | `15.0` | detection rate [Hz]; camera frames arriving faster are skipped |
 | `~dictionary` | `DICT_4X4_50` | any `cv2.aruco.DICT_*` name |
 
 ### `mock_ar_tag_publisher.py` (`use_mock_tag:=true`)
 
 Vision module without a camera: computes what a down-facing camera *would*
-see for a target at a fixed world position, from real odometry plus an
-assumed `~horizontal_fov`, and publishes the same pixel-only
-`ibvs/target_point` interface. The odometry-derived depth is used
-internally only to project the target and to decide whether it's "in
-view" — it is never published, matching what a real pixel-only detector
-would (and wouldn't) know.
+see for a target at a fixed world position, from real odometry, and
+publishes the same `ibvs/target_point` interface (including the depth). It
+only publishes while the target is below the vehicle, so `TAG_IN_SIGHT`
+behaves realistically.
 
 | Param | Default | Meaning |
 |---|---|---|
@@ -423,8 +420,6 @@ would (and wouldn't) know.
 | `~tag_world_position` | `[0.0, 0.0, 0.02]` | target position, local frame |
 | `~odom_topic` | `mavros/local_position/odom` | odometry source |
 | `~min_depth` | `0.1` | minimum distance below the vehicle to count as "in view" [m] |
-| `~image_width` / `~image_height` | `640` / `480` | must match the controller's (set via the launch file) |
-| `~horizontal_fov` | `1.3962634` | assumed camera FOV [rad], used only to fake a believable pixel position (default: kopterworx down camera, 80°) |
 
 ## 7. Building
 
@@ -456,7 +451,7 @@ with windows:
 | `gazebo` | kopterworx in Gazebo |
 | `visualization` | PlotJuggler / RViz (pre-typed in history, press ↑) |
 | `ibvs` | `ibvs_perching.launch` + takeoff / start / stop / disarm commands (history) |
-| `status` | echoes of `mavros/state`, `ibvs/state`, `ibvs/target_point`, `setpoint_raw/attitude`, odometry |
+| `status` | echoes of `mavros/state`, `ibvs/state`, `ibvs/tag_pose`, `setpoint_raw/attitude`, odometry |
 
 The mission is **two explicit steps** — the pre-typed commands are waiting in
 the `ibvs` window's panes (press ↑):
@@ -479,14 +474,11 @@ camera in `rqt_image_view` on `ibvs/debug_image`):
    **holding position at 2 m**. Nothing else happens until you say so.
 2. Watch `ibvs/state`: when the down-facing camera picks up the marker it
    flips `HOVER` → **`TAG_IN_SIGHT`** — that's your cue.
-3. `ibvs/start` → `ALIGN`: centers the tag laterally and holds whatever
-   height the vehicle is at **right now** (`hold_height`, latched at this
-   exact moment — usually ≈2 m here, but it's this event that anchors it,
-   not `takeoff_height`) — **no descent yet** (§11): no depth means the
-   controller cannot know how far above the tag it is, and no depth-free
-   descent strategy is enabled for now either.
-4. `ALIGNED`: pixel-space error < `align_tolerance_px` for 2 s → holding
-   centered at `hold_height`.
+3. `ibvs/start` → `ALIGN`: centers the tag laterally (the descend gate
+   blocks descent while off-centre), then descends onto it at a fixed slow
+   rate.
+4. `ALIGNED`: error < `align_tolerance_px` (40 px) for 2 s → centred, and
+   `land` mode disarms once it is low enough.
 
 There is intentionally **no** `control_manager` takeoff service call — no
 tracker/controller is running; the `CLIMB` state *is* the takeoff. Note that
@@ -524,7 +516,7 @@ the motors; any RC/mode change drops the controller back to `WAIT_ARM`.
 **Stuck in `WAIT_ARM`** — `mavros/state` shows `mode` ≠ `GUIDED_NOGPS` or
 `armed: false`. The mode string must match exactly.
 
-**Stuck in `TAG_LOST`** — no fresh `ibvs/target_point`. Is the mock (or real
+**Stuck in `TAG_LOST`** — no fresh `ibvs/tag_pose`. Is the mock (or real
 detector) running? Is odometry arriving on `~odom_topic`?
 
 **Drifts away instead of aligning** — gain sign issue: the `kp_pitch` /
@@ -539,13 +531,12 @@ Launch with the mock disabled and remap your detector's output:
 roslaunch ibvs_perching ibvs_perching.launch use_mock_tag:=false
 ```
 
-Your detector must publish `geometry_msgs/PointStamped` on
-`/$UAV_NAMESPACE/ibvs/target_point` with the target's **pixel** coordinates
-(see the interface in §3) — no camera calibration or depth needed, just the
-detected center and matching `~image_width`/`~image_height` on the
-controller. Keep the rate ≥ a few Hz; detections older than `tag_timeout`
-put the controller into `TAG_LOST` (altitude hold), which is the intended
-graceful degradation under occlusion or detection dropouts.
+Your detector must publish `geometry_msgs/PoseStamped` on
+`/$UAV_NAMESPACE/ibvs/tag_pose` with the tag position **in the body FLU
+frame** (camera→body extrinsics applied). Keep the rate ≥ a few Hz;
+detections older than `tag_timeout` put the controller into `TAG_LOST`
+(altitude hold), which is the intended graceful degradation under occlusion
+or detection dropouts.
 
 ## 11. Known limitations & future work
 
@@ -555,20 +546,12 @@ graceful degradation under occlusion or detection dropouts.
 - **P-only control** — no integral action (steady-state offset under wind)
   and no derivative/velocity damping. The firmware's rate loops provide inner
   damping, but aggressive gains will oscillate.
-- **No descent at all, for now** — `ALIGN`/`ALIGNED` only center the target
-  laterally and hold `hold_height` (the height when servoing started, §5);
-  centering it does not bring the vehicle any closer. This was a
-  deliberate simplification, not a fundamental limit: a previous iteration
-  had a depth-free open-loop
-  descent ramp (thrust stepping down from `hover_thrust` while laterally
-  centered, gated by lateral error and a minimum-odometry-altitude safety
-  floor — see git history / §5 for the idea) that can be reintroduced. A
-  vision module that *can* estimate distance (e.g. from a known object
-  size) could instead reintroduce a depth field and a proper standoff PID.
-- **No terminal "perch" state** — the machine ends at `ALIGNED` (centered,
-  hovering). The actual descent, final approach/contact phase (e.g. handing
-  over to the `perching_uav` trajectory pipeline, or a gripper trigger) is
-  the natural next state to add.
+- **Z is regulated on the tag detection only** — with the tag lost, altitude
+  is held open-loop (`0.5` climb rate) with no barometer/odometry fallback.
+- **No terminal "perch" state** — the machine ends at `ALIGNED` (hover at
+  standoff). The actual final approach/contact phase (e.g. handing over to
+  the `perching_uav` trajectory pipeline, or a gripper trigger) is the
+  natural next state to add.
 - Body-rate X-Y control causes lateral drift *while* rotating (rates ≠
   velocities); the P-loop corrects it continuously, but a velocity-based
   outer loop would track faster.
@@ -604,14 +587,10 @@ with `engage_on_target: true` (`custom_config/ibvs_params_rw.yaml`):
    `ibvs/target_point` — a tag detection, or any point you choose to
    publish — engages: the controller switches the FCU to `GUIDED_NOGPS`
    itself and goes straight to `ALIGN` (`CLIMB` is skipped, the vehicle is
-   already airborne). Altitude is held at exactly **wherever the vehicle
-   was flying at this moment** (`hold_height`, §5) — this flow never uses
-   `takeoff_height` at all. If the point goes stale within `tag_timeout`, it
-   simply **holds position** (`TAG_LOST`) — button + one point at the
-   frame center (`image_width/2, image_height/2` — **not** `(0,0)`, which
-   is the top-left pixel corner, not the center) is effectively position
-   hold. (Set `engage_needs_start: false` to skip the button and engage on
-   the very first point.)
+   already airborne). If the point goes stale within `tag_timeout`, it
+   simply **holds position** (`TAG_LOST`) — button + one empty point is
+   effectively position hold. (Set `engage_needs_start: false` to skip
+   the button and engage on the very first point.)
 3. The safety pilot can **always** take back control with the RC mode
    switch. The software mode switch is one-shot: after a takeover the
    controller never re-takes the mode on its own. Flip the RC switch back

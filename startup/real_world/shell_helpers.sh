@@ -34,3 +34,29 @@ waitForSysStatus() {
       sleep 1
     done
 }
+
+# Block until mavros has finished downloading the FCU parameter table.
+# Setting a parameter before the pull completes makes mavros/param/set reject
+# with an empty error ("responded with an error: b''"), which is why
+# GUID_OPTIONS used to fail intermittently right after startup.
+waitForParams() {
+  until timeout 25s rosservice call /$UAV_NAMESPACE/mavros/param/pull "force_pull: false" 2>/dev/null | grep -q "success: True"; do
+    echo "waiting for params"
+    sleep 2
+  done
+}
+
+# setParam NAME VALUE -- set an FCU parameter, retrying until it sticks.
+setParam() {
+  local name=$1 val=$2 i
+  for i in $(seq 1 10); do
+    if rosrun mavros mavparam -n $UAV_NAMESPACE/mavros set "$name" "$val" 2>/dev/null; then
+      echo "setParam: $name=$val OK"
+      return 0
+    fi
+    echo "setParam: retry $name ($i/10)"
+    sleep 2
+  done
+  echo "setParam: ERROR could not set $name after retries"
+  return 1
+}

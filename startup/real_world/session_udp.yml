@@ -1,0 +1,48 @@
+name: ibvs_perching_udp
+root: ./
+startup_window: ibvs
+# All settings come from start_udp.sh (fcu_url, mission_mode, namespace,
+# bind_port, cx/cy/fx/fy) -- DO NOT edit them here, edit start_udp.sh.
+pre_window: export UAV_NAMESPACE=<%= @settings["namespace"] %> && source ./shell_helpers.sh
+
+
+windows:
+  - stack:
+      layout: tiled
+      panes:
+        - roscore
+        # mavros straight from ibvs_perching (config/apm_config.yaml).
+        - waitForRos; roslaunch ibvs_perching mavros_apm.launch fcu_url:=<%= @settings["fcu_url"] %>
+        # GUID_OPTIONS 0 => thrust is a CLIMB RATE (0.5 hover). GUID_OPTIONS 8
+        # (raw thrust) makes this controller fly away! Then bump stream rates.
+        - waitForRos; waitForMavros; waitForParams;
+          setParam GUID_OPTIONS 0;
+          rosrun mavros mavsys -n $UAV_NAMESPACE/mavros rate --all 50
+        - waitForRos; rosbag record -a
+  - ibvs:
+      layout: tiled
+      panes:
+        # UDP receiver (PiOS pixel position -> ibvs/target_point) + controller.
+        # mission_mode + camera resolution + port all come from start_udp.sh.
+        - waitForRos; waitForMavros;
+          roslaunch ibvs_perching ibvs_udp.launch
+          config:=$(pwd)/custom_config/ibvs_params_rw.yaml
+          mission_mode:=<%= @settings["mission_mode"] %>
+          bind_port:=<%= @settings["bind_port"] %>
+          image_width:=<%= @settings["image_width"] %>
+          image_height:=<%= @settings["image_height"] %>
+        # single lightweight monitor: the IBVS state machine
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/error
+        # commanded attitude: x=roll y=pitch z=yaw [rad] (ibvs/pid_roll and
+        # ibvs/pid_pitch carry the P/I/D split; plot those rather than echo)
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/control_angles
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
+  - reboot:
+      layout: tiled
+      panes:
+        - | 
+          history -s "rosservice call /mavros/cmd/command \"{broadcast: false, command: 246, confirmation: 0, param1: 1.0, param2: 0.0, param3: 0.0, param4: 0.0, param5: 0.0, param6: 0.0, param7: 0.0}\""
+        

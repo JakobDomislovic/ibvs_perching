@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- IBVS perch/land driven by OFF-BOARD detection over UDP.
+
+       The companion computer (PiOS) detects the ArUco tag (landing) or the
+       branch (perching), and streams the target's pixel error + range over
+       UDP. udp_target_receiver republishes that as ibvs/target_point and the
+       IBVS controller flies ArduPilot directly through
+       mavros/setpoint_raw/attitude (NO OptiTrack, NO uav_ros_stack tracker).
+
+       This launch does NOT start mavros; bring it up separately (e.g.
+       mavros_apm.launch). Two modes, pick one:
+         landing:  roslaunch ibvs_perching ibvs_udp.launch mission_mode:=land
+         perching: roslaunch ibvs_perching ibvs_udp.launch mission_mode:=perch
+  -->
+
+  <arg name="namespace" default="$(env UAV_NAMESPACE)"/>
+  <arg name="config" default="$(find ibvs_perching)/config/ibvs_params.yaml"/>
+
+  <!-- 'land' (down cam, descend + disarm) or 'perch' (up cam, climb) -->
+  <arg name="mission_mode" default="land"/>
+
+  <!-- UDP source (PiOS detector) -->
+  <arg name="bind_ip"   default="0.0.0.0"/>
+  <arg name="bind_port" default="5005"/>
+
+  <!-- PiOS camera RESOLUTION. This is the ONLY camera knowledge the stack
+       needs: the controller normalizes the detection's pixel position by each
+       axis' half-dimension, so the error is +-1.0 at that axis' frame edge.
+       NO focal length, NO principal point, NO CALIBRATION, which also means
+       gains and tolerances survive a resolution change.
+
+       MUST match the resolution the PiOS detector reports px/py in. If it
+       downscales before detecting, use the DOWNSCALED size, not the capture
+       size. PiOS camera is the DSJ-3079-HE (USB UVC, detection_pipeline's
+       DSJSource.py) captured at 1280x720. -->
+  <arg name="image_width"  default="1280"/>
+  <arg name="image_height" default="720"/>
+
+  <group ns="$(arg namespace)">
+
+    <!-- UDP receiver: PiOS detection -> ibvs/target_point (the raw pixel
+         POSITION of the detection, whole pixels; no geometry applied) -->
+    <node pkg="ibvs_perching" type="udp_target_receiver.py"
+          name="udp_target_receiver" output="screen">
+      <param name="bind_ip"   value="$(arg bind_ip)"/>
+      <param name="bind_port" value="$(arg bind_port)"/>
+    </node>
+
+    <!-- IBVS controller: centers on the target, then descends+disarms (land)
+         or climbs toward the branch (perch). mission_mode and the camera
+         geometry here OVERRIDE the values loaded from the config file.
+         (last param wins) The controller normalizes the incoming pixel
+         position against image_width/image_height; ~target_x / ~target_y are
+         a frame-fraction offset, 0.0 = centred. -->
+    <node pkg="ibvs_perching" type="ibvs_controller.py"
+          name="ibvs_controller" output="screen">
+      <rosparam file="$(arg config)" command="load"/>
+      <param name="mission_mode" value="$(arg mission_mode)"/>
+      <param name="image_width"  value="$(arg image_width)"/>
+      <param name="image_height" value="$(arg image_height)"/>
+    </node>
+
+  </group>
+
+</launch>

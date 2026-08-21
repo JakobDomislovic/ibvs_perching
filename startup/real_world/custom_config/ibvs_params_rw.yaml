@@ -1,76 +1,221 @@
 # ibvs_controller.py parameters -- REAL WORLD (startup/real_world).
 #
-# Same controller as in simulation (config/ibvs_params.yaml). The vehicle
-# is flown MANUALLY (STABILIZE) by the safety pilot; call ibvs/start (the
-# IBVS joystick button -- 'i' on the sim keyboard) and the next point
-# published on ibvs/target_point makes the controller switch the FCU to
-# GUIDED_NOGPS itself and start servoing -- no takeoff service, no
-# position_hold handshake. The safety pilot always takes back control
-# with the RC mode switch; after such a takeover the controller never
-# re-takes the mode on its own (flip the RC switch back to GUIDED_NOGPS
-# to re-engage, or press the button again for the next point to engage).
+# Off-board detection: the PiOS companion detects the target and streams its
+# pixel position over UDP; udp_target_receiver republishes ibvs/target_point
+# and this controller flies ArduPilot directly (mavros/setpoint_raw/attitude).
+# There is NO range sensor and NO OptiTrack -- the vertical axis is open-rate.
 #
-# GUID_OPTIONS must be 0 on the FCU (set in session.yml): thrust is a
+# The safety pilot flies MANUALLY (STABILIZE). The controller streams
+# setpoints continuously; ArduPilot only acts on them in GUIDED_NOGPS, and
+# the PILOT is the one who selects that on the RC mode switch -- this node
+# never changes the flight mode by itself. Flipping the switch away hands
+# control back instantly, from any state.
+#
+# GUID_OPTIONS must be 0 on the FCU (set in the startup session): thrust is a
 # CLIMB RATE (0.0 max descent, 0.5 hover, 1.0 max climb), NOT raw thrust.
 
-engage_on_target: true        # a fresh ibvs/target_point engages the controller
-engage_needs_start: true      # ...but only after ibvs/start (joystick button)
+# ---------------------------------------------------------------------------
+# Mission mode: 'land' (down cam, descend + disarm) or 'perch' (up cam, climb
+# toward the branch). Override per run from the launch (mission_mode:=perch).
+# ---------------------------------------------------------------------------
+mission_mode: land
+
+# Image->body sign per axis. The vision interface the controller ASSUMES is
+# point.x positive RIGHT, point.y positive DOWN (the usual top-left-origin
+# image convention). The PiOS detector does NOT use that: its frame has
+# x positive LEFT and y positive UP, so BOTH axes are inverted relative to
+# the assumption and both signs are -1.0.
+#
+# These knobs mirror the ERROR about the image centre; they never move the
+# aim point, so a detection dead centre stays zero-error whatever they are.
+# Set them so a target off to one side produces a correction TOWARD it.
+# MEASURED from 2026-08-18-11-54-50.bag, both engagement windows, 104
+# detections: at -1/-1 the commanded angle pushed the error the WRONG WAY on
+# BOTH axes in 104 of 104 samples (the command sat saturated at max_tilt while
+# the error grew monotonically -- textbook positive feedback). At +1/+1 the
+# same 104 samples are correct 104/104.
+#
+# So the PiOS detector uses the ORDINARY top-left-origin convention after all
+# -- x positive RIGHT, y positive DOWN -- exactly like OpenCV and the sim.
+# The earlier -1/-1 came from inferring the convention out of bag statistics
+# (bd3313d) rather than measuring it, and that inference was wrong.
+#
+# With your frames (camera +x EAST, +y SOUTH; body +x NORTH, +y WEST):
+#   err.x > 0 -> target right in image -> EAST  -> needs +roll
+#   err.y > 0 -> target down  in image -> SOUTH -> needs -pitch
+image_x_sign: 1.0             # PiOS x is positive RIGHT (as the controller assumes)
+image_y_sign: 1.0             # PiOS y is positive DOWN  (as the controller assumes)
+
+# ---------------------------------------------------------------------------
+# Engagement (real world): the FCU mode is the PILOT'S. This node never
+# switches it -- only the explicit ibvs/takeoff service may. ibvs/stop
+# disables servoing, ibvs/start re-enables it.
+# ---------------------------------------------------------------------------
+engage_on_target: true        # skip CLIMB and servo straight away once armed
+                              # and in GUIDED_NOGPS. The controller does NOT
+                              # switch the mode: the PILOT selects
+                              # GUIDED_NOGPS and ibvs/start enables servoing.
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
-# NOTE: ~image_width/~image_height (the camera resolution) are NOT set here
-# -- set them, together, on the controller AND the real detector node via
-# the launch file's image_width/image_height args, so they can't drift.
-
 # ---------------------------------------------------------------------------
-# Z axis -- climb rate through the AttitudeTarget "thrust" field. No depth
-# from the vision module -> no standoff to regulate toward, and FOR NOW no
-# depth-free descent strategy is enabled either: ALIGN/ALIGNED hold the
-# ODOMETRY height the vehicle was at when servoing started (latched the
-# moment engagement happens -- see ibvs_controller.py transition() -- i.e.
-# wherever the safety pilot was flying when they pressed the IBVS button,
-# NOT takeoff_height, which this flow never even uses). Centering the
-# target laterally does not by itself bring the vehicle any closer to it.
+# Vertical axis -- open-rate climb control through the thrust field (no range
+# sensor). 0.0 max descent, 0.5 hover, 1.0 max climb.
 # ---------------------------------------------------------------------------
 hover_thrust: 0.5             # zero-climb-rate ("hover") command
 climb_thrust: 0.52            # only used by the ibvs/takeoff CLIMB path
 thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
-kp_alt_hold: 0.3               # thrust delta per meter of height error
-kv_alt_hold: 0.2               # thrust delta per m/s of climb-rate damping
+
+perch_climb_thrust: 0.55      # PERCH: constant climb while centered on the branch
+land_descend_thrust: 0.45     # LAND: constant slow descent while centered
+
+# LAND terminal: disarm once centered (within descend_xy_gate) and below
+# land_disarm_height (odometry altitude), held for land_disarm_dwell seconds.
+disarm_on_land: true
+land_disarm_height: 0.15      # [m] odometry altitude below which disarm triggers
+land_disarm_dwell: 0.3        # [s] condition must hold this long before disarm
 
 # ---------------------------------------------------------------------------
-# X-Y axis -- closed-loop IBVS cascade on the target's pixel error, as a
-# FRACTION of the half-frame (0 = centered, +-1 = frame edge):
-#   desired_tilt = PID_xy(frame-fraction error), body_rate = kp_att * (tilt error)
+# X-Y axis -- CASCADE on the image error, with an IMU attitude inner loop:
+#   desired_tilt = PID_xy(error)                     (clamped to max_tilt)
+#   body_rate    = kp_att * (desired_tilt - current_tilt)
+# The error is the detection's offset from centre normalized per axis by its
+# own half-dimension, so it is +-1.0 at that axis' frame edge. No fx/fy, no
+# depth_guess, NO CAMERA CALIBRATION anywhere in the chain.
+# ~image_width / ~image_height come from the launch, not from here, so they
+# cannot drift from the resolution the detector actually reports.
+#
+# Attitude comes from mavros/imu/data (the FCU's AHRS), which needs no
+# position solution -- it works with no GPS and no OptiTrack. This is the
+# overshoot fix: the inner loop actively pulls the built-up tilt back toward
+# level as the error shrinks, which a bare rate command could never do.
 # ---------------------------------------------------------------------------
-target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
-target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centered)
+target_x: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+target_y: 0.0                 # desired lateral offset, frame-fraction (0 = centred)
+descend_xy_gate_px: 70        # [px] descend/climb only while centred within this.
+                              # Kept LARGER than align_tolerance_px so ALIGNED
+                              # always implies the descent is allowed.
 
-max_tilt: 0.15                # [rad] desired-tilt clamp (~8.5 deg)
-kp_att: 1.5                   # body rate per rad of attitude error [1/s]
-max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s)
-kp_hover: 0.15                # position-hold P outside ALIGN [rad/m]
-kv_hover: 0.25                # velocity damping for the position hold [rad per m/s]
+# How the desired tilt is sent to the FCU:
+#   attitude  publish the target ATTITUDE quaternion and let ArduPilot close
+#             the attitude loop (400 Hz, tuned ATC_* gains). Requires sane
+#             ATC_ANG_RLL_P / ATC_ANG_PIT_P on the vehicle.
+#   rate      publish a body rate from our own kp_att loop (previous
+#             behaviour). Switch to this to A/B the two on the bench.
+command_mode: attitude
+
+# TEST SETTING -- 2 deg. This is the SPEED limit, and the main safety knob:
+# the vehicle can never be commanded steeper than this, however big the pixel
+# error gets, so it also bounds how much damage a wrong sign can do.
+#
+#   tilt     max lateral accel    steady approach speed (g*sin(t)/c, c~0.75)
+#   1 deg        0.17 m/s2            0.23 m/s
+#   2 deg        0.34 m/s2            0.46 m/s   <-- here: ~4.4 s to cross 2 m
+#   5 deg        0.86 m/s2            1.14 m/s
+#   8.6 deg      1.47 m/s2            1.96 m/s   (the old 0.15 rad)
+#
+# CAUTION at 2 deg: the drift back-derived from the ROLL axis of
+# 2026-08-17-18-30-59.bag is ~0.25 m/s2 (that axis had the correct sign, so its
+# standing error is genuine steady state). That eats 1.44 deg = 72% of a 2 deg
+# budget, leaving only ~0.10 m/s2 to actually manoeuvre with. Fine for a slow
+# direction-check; raise to 3-5 deg if it cannot make headway.
+max_tilt: 0.035               # [rad] desired-tilt clamp (2.0 deg)
+
+# RATE mode only (ignored when command_mode is 'attitude').
+kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
+max_body_rate: 0.35           # [rad/s] clamp for both roll/pitch rate (~20 deg/s).
+                              # Keep >= kp_att * max_tilt (= 0.225 here) or the
+                              # inner loop saturates before it can track a
+                              # full-scale tilt command.
 
 # ---------------------------------------------------------------------------
-# PID gains -- carried over numerically from the old metric gains as a
-# STARTING POINT ONLY. The error is now dimensionless (frame-fraction,
-# roughly -1..1 instead of unbounded meters): retune by flying it.
+# OUTER-loop PID gains. UNITS: kp is rad of TILT per unit frame-fraction, so
+# kp IS the tilt commanded at the frame edge (kp 0.06 => 3.4 deg there). This
+# is a TILT, not a rate; the inner attitude loop turns it into one.
+#
+# RETUNED against 2026-08-17-18-30-59.bag, the first bag that engaged. It shows
+# kp 0.06 commanding only ~1 deg of tilt while the error GREW to 0.42/-0.59 of
+# the frame and stayed there, across all three engagement windows.
+#
+# That is not divergence, it is the steady-state error a pure-P outer loop
+# MUST have against a constant disturbance (wind, AHRS trim):
+#
+#     err_ss = (a_dist / g) / kp        frame-fractions
+#
+#     kp      0.15 m/s2   0.30 m/s2   0.50 m/s2
+#     0.06         0.25        0.51        0.85     <-- what that bag flew
+#     0.12         0.13        0.25        0.42
+#     0.20         0.08        0.15        0.25
+#
+# At kp 0.06, 0.3 m/s^2 of drift needs HALF THE FRAME of standing error, which
+# is what the bag recorded. Two fixes, both applied: raise kp, and give the
+# loop an INTEGRATOR so a steady disturbance is trimmed out instead of being
+# balanced by standing error. Simulated (attitude mode, 0.3 m/s^2 disturbance,
+# 5.09 Hz detector as measured in that bag, 10 seeds):
+#
+#     kp .06 ki 0    kd .12   peak 0.526  never settles  final 0.510
+#     kp .12 ki 0    kd .20   peak 0.307  never settles  final 0.255
+#     kp .12 ki .02  kd .20   peak 0.306  settles  9s    final 0.000  <-- this
+#     kp .12 ki .05  kd .20   peak 0.305  settles  6s    final 0.000
+#
+# Still gentle: kp 0.12 is 6.9 deg of tilt at the frame edge, and max_tilt
+# caps everything at 8.5 deg. Raising the detection rate remains the single
+# best available improvement.
+#
+# kd: the old bare-rate law needed c*kd > kp just to avoid diverging. That
+# knife edge is gone -- desired_tilt is clamped and bounded now. But kd=0
+# still oscillates without settling, so keep it non-zero.
+# NOT yet flight tested in this form.
 # ---------------------------------------------------------------------------
 pid_xy:
-  kp: 0.10                    # desired tilt per unit of frame-fraction error [rad]
-  ki: 0.0                     # [rad/s]
-  kd: 0.15                    # [rad per unit/s] velocity damping -- keep > 0
-  i_max: 0.05                 # [rad] max integral contribution
+  # P-ONLY TEST SETTING. kp and max_tilt are INDEPENDENT knobs and it is worth
+  # not confusing them: max_tilt caps the SPEED (safety), kp sets the STANDING
+  # ERROR. Lowering kp does not make the test gentler, it only makes it less
+  # accurate -- pure P must hold err_ss = (a_drift/g)/kp to balance the drift:
+  #
+  #   kp     saturates at |err|   standing error at 0.25 m/s2 of drift
+  #   0.035        1.00 (edge)        0.72   <- target nearly leaves the frame
+  #   0.070        0.50               0.36
+  #   0.140        0.25               0.18   <- here: ~115 px in x, ~65 px in y
+  #
+  # kp 0.14 with max_tilt 0.035 means the outer 3/4 of the frame just commands
+  # a flat 2 deg and the last quarter is proportional. That is deliberate: full
+  # (slow) authority while far out, gentle as it closes.
+  kp: 0.14                    # [rad per unit] 2 deg reached at 1/4-frame error
+  ki: 0.02                    # OFF for this test. Note pure P CANNOT remove the
+                              # standing error above -- it needs a permanent
+                              # offset to generate the tilt that balances drift.
+                              # Set ~0.02 once the direction is confirmed.
+  kd: 0.09                    # OFF for this test. This is the braking term: it
+                              # is what commands tilt AWAY before arrival, so
+                              # with kd 0 expect overshoot on the way in.
+  i_max: 0.025                 # [rad] max integral contribution -- this is the
+                              # trim authority: 0.05 rad of tilt cancels about
+                              # g*0.05 = 0.49 m/s^2 of steady disturbance, and
+                              # bounds how far the integrator can wind up
+  d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
+  d_max_dt: 0.40              # [s] longest detection gap still differentiated;
+                              # beyond it the D term is zeroed instead of
+                              # computed across the gap.
+                              # WAS 0.15, which sat just BELOW the measured
+                              # median gap of 0.157 s -- so the D term was
+                              # being discarded on ~80% of detections and kd
+                              # was very nearly inert (simulated: overshoot
+                              # 0.369 vs 0.394 for pure P). 0.40 is ~2.5x the
+                              # median gap: D survives normal detections and
+                              # is still rejected across the real stalls.
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
-align_tolerance_px: 20         # [px] target must be within this many pixels of
-                              # center to count as "aligned" -- retune by flying it
-align_dwell_time: 2.0         # [s] error must stay aligned this long -> ALIGNED
+align_tolerance_px: 70        # [px] target must be within this many pixels of
+                              # the aim point to count as "aligned" -- the
+                              # doubled tolerance, now stated in pixels
+                              # directly (was 0.30 m at fx=251/depth 2.0).
+                              # Exits ALIGNED at 60 px via align_hysteresis.
+align_dwell_time: 1.5         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST
