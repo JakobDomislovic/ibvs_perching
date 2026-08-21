@@ -3,9 +3,10 @@
   <name>ibvs_perching</name>
   <version>0.0.0</version>
   <description>
-    Image-Based Visual Servoing (IBVS) for AR-tag perching. Bypasses the
+    Image-Based Visual Servoing (IBVS) for perching, driven by off-board
+    detection streamed from the PiOS companion over UDP. Bypasses the
     uav_ros_stack tracker/controller and drives ArduPilot directly through
-    mavros/setpoint_raw/attitude (body rates + thrust).
+    mavros/setpoint_raw/attitude.
   </description>
 
   <maintainer email="jakob.domislovic@gmail.com">developer</maintainer>
@@ -32,17 +33,10 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>mavros_msgs</exec_depend>
-  <exec_depend>tf</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>gazebo_ros</exec_depend>
-  <!-- real world: mavros_apm.launch runs mavros_node directly (the apm
-       pluginlists also pull plugins from mavros_extras) -->
+  <exec_depend>tf</exec_depend>
+  <!-- mavros_apm.launch runs mavros_node directly (the apm pluginlists also
+       pull plugins from mavros_extras) -->
   <exec_depend>mavros</exec_depend>
   <exec_depend>mavros_extras</exec_depend>
-
-  <export>
-    <!-- lets gazebo resolve model://ar_tag (texture + material) -->
-    <gazebo_ros gazebo_model_path="${prefix}/models"/>
-  </export>
 </package>

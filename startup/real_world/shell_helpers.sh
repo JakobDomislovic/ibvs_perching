@@ -1,4 +1,4 @@
-# Shell helpers used by session.yml, copied from uav_ros_stack's
+# Shell helpers used by session_udp.yml, copied from uav_ros_stack's
 # miscellaneous/shell_additions/shell_scripts.sh (credit to
 # https://github.com/ctu-mrs/mrs_uav_system) so the real-world startup
 # works without the uav_ros_stack installed.

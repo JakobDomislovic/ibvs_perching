@@ -15,7 +15,7 @@
   -->
 
   <arg name="namespace" default="$(env UAV_NAMESPACE)"/>
-  <arg name="config" default="$(find ibvs_perching)/config/ibvs_params.yaml"/>
+  <arg name="config" default="$(find ibvs_perching)/startup/real_world/custom_config/ibvs_params_rw.yaml"/>
 
   <!-- 'land' (down cam, descend + disarm) or 'perch' (up cam, climb) -->
   <arg name="mission_mode" default="land"/>

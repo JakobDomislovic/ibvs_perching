@@ -9,9 +9,9 @@ switching (GUIDED_NOGPS) are done by the ibvs/takeoff service -- this node
 only ever streams AttitudeTarget setpoints.
 
 VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
-    The controller is agnostic to WHAT is being tracked. Any vision module
-    (ArUco today, anything else tomorrow) publishes the point it wants
-    centered in the camera image:
+    The controller is agnostic to WHAT is being tracked. The PiOS companion
+    detects the target off-board and streams its pixel position over UDP;
+    udp_target_receiver republishes it as the point to centre in the image:
         point.x  horizontal PIXEL POSITION of the detection in the image,
                  positive RIGHT, from the image origin (top-left)
         point.y  vertical PIXEL POSITION of the detection in the image,
@@ -184,8 +184,8 @@ Two-step mission (both std_srvs/Trigger):
 REAL WORLD (~engage_on_target: true, see startup/real_world):
     The safety pilot flies the vehicle manually (e.g. STABILIZE). Two
     things must both be true before the controller does anything:
-        1. servoing enabled  -- `ibvs/start` ('i' on the sim keyboard
-           joystick, a joystick button on the real RC), or ~auto_start
+        1. servoing enabled  -- `ibvs/start` (a joystick button on the
+           real RC, or called by hand), or ~auto_start
         2. the PILOT selects GUIDED_NOGPS on the RC mode switch
     Then the controller goes straight to ALIGN (the vehicle is already
     airborne, CLIMB is skipped). `ibvs/stop` disables servoing again, and

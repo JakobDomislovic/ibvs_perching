@@ -13,17 +13,11 @@ catkin_package()
 
 catkin_install_python(PROGRAMS
   scripts/ibvs_controller.py
-  scripts/mock_ar_tag_publisher.py
-  scripts/aruco_detector.py
   scripts/udp_target_receiver.py
-  scripts/rc_to_joy.py
-  scripts/keyboard_rc.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 install(DIRECTORY launch DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
 install(DIRECTORY config DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
-install(DIRECTORY models DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
-install(DIRECTORY urdf DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
 install(DIRECTORY startup DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
         USE_SOURCE_PERMISSIONS)
