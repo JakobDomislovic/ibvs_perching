@@ -18,7 +18,7 @@
 # Mission mode: 'land' (down cam, descend + disarm) or 'perch' (up cam, climb
 # toward the branch). Override per run from the launch (mission_mode:=perch).
 # ---------------------------------------------------------------------------
-mission_mode: perch
+mission_mode: land                # 'land' (down cam) or 'perch' (up cam)
 
 # Image->body sign per axis. The controller ASSUMES point.x positive RIGHT and
 # point.y positive DOWN (ordinary top-left-origin image convention, which the
@@ -39,7 +39,7 @@ mission_mode: perch
 #         level in y -- so image-left = drone-right. y is unchanged from LAND.
 #
 # Check any change with:  ./sim_tilt.py --sweep
-image_x_sign: -1.0            # PERCH (up cam): inverted vs LAND's +1.0
+image_x_sign: 1.0            # PERCH (up cam): inverted -1.0 vs LAND's +1.0
 image_y_sign: 1.0             # PERCH (up cam): unchanged from LAND
 
 # ---------------------------------------------------------------------------
