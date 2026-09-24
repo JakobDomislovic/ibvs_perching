@@ -16,6 +16,10 @@
 FCU_URL=/dev/ttyUSB0:921600      # mavros serial link to the flight controller
                                  # (stable alt: /dev/serial/by-id/usb-FTDI_TTL-234X-5V_FT7YLB0N-if00-port0)
 MISSION_MODE=land                # land = down cam, descend+disarm | perch = up cam, climb
+                                 # THIS wins over mission_mode in ibvs_params_rw.yaml (the
+                                 # launch sets it as an explicit <param> after the rosparam
+                                 # load). Switching to perch also needs image_x_sign: -1.0
+                                 # in that yaml -- image_y_sign is +1.0 in both modes.
 UAV_NAMESPACE=red                # ROS namespace for mavros + ibvs
 
 BIND_PORT=5005                   # UDP port the PiOS detector sends to

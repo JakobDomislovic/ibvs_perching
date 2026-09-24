@@ -17,8 +17,15 @@
 # ---------------------------------------------------------------------------
 # Mission mode: 'land' (down cam, descend + disarm) or 'perch' (up cam, climb
 # toward the branch). Override per run from the launch (mission_mode:=perch).
+#
+# CURRENTLY: LAND. To go back to PERCH, three things move together --
+#   mission_mode here            perch
+#   image_x_sign below          -1.0   (image_y_sign is +1.0 in BOTH modes)
+#   MISSION_MODE in start_udp.sh perch  <- the launch sets mission_mode as an
+#       explicit <param> AFTER the <rosparam> load, so this yaml alone does
+#       NOT take effect; start_udp.sh wins.
 # ---------------------------------------------------------------------------
-mission_mode: land                # 'land' (down cam) or 'perch' (up cam)
+mission_mode: land
 
 # Image->body sign per axis. The controller ASSUMES point.x positive RIGHT and
 # point.y positive DOWN (ordinary top-left-origin image convention, which the
@@ -39,8 +46,8 @@ mission_mode: land                # 'land' (down cam) or 'perch' (up cam)
 #         level in y -- so image-left = drone-right. y is unchanged from LAND.
 #
 # Check any change with:  ./sim_tilt.py --sweep
-image_x_sign: 1.0            # PERCH (up cam): inverted -1.0 vs LAND's +1.0
-image_y_sign: 1.0             # PERCH (up cam): unchanged from LAND
+image_x_sign: 1.0             # LAND (down cam). PERCH (up cam) would be -1.0
+image_y_sign: 1.0             # LAND (down cam). Same value in PERCH
 
 # ---------------------------------------------------------------------------
 # Engagement (real world): the FCU mode is the PILOT'S. This node never
