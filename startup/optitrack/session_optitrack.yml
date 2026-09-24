@@ -61,6 +61,7 @@ windows:
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/control_angles
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/thrust
   - reboot:
       layout: tiled
       panes:
