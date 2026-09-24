@@ -205,7 +205,7 @@ ENGAGEMENT -- THE FCU MODE IS THE PILOT'S:
     is now the interlock in both directions -- ArduPilot obeys these
     setpoints only in GUIDED_NOGPS, and only the pilot puts it there.
 
-Thrust ("climb rate") per state:
+Thrust ("climb rate") per state, mission_mode 'land' / 'perch':
     WAIT_ARM  hover_thrust (neutral; ignored anyway while disarmed)
     CLIMB     climb_thrust (constant climb -> this IS the takeoff)
     HOVER     hover_thrust (hold altitude, wait for ibvs/start)
@@ -213,6 +213,10 @@ Thrust ("climb rate") per state:
               (perch); off-center: hover_thrust
     ALIGNED   same as ALIGN (land then disarms once low; perch keeps climbing)
     TAG_LOST  hover_thrust (hold altitude, wait for re-detection)
+
+mission_mode 'hover' overrides ALL of the above except CLIMB: every other
+state runs the height-hold PID toward ~hover_height instead, regardless of
+X-Y alignment -- see MODE_HOVER above and compute_thrust.
 """
 
 import math
@@ -236,16 +240,25 @@ ALIGN = 'ALIGN'
 ALIGNED = 'ALIGNED'
 TAG_LOST = 'TAG_LOST'
 
-# Mission mode -- what the vertical (thrust/climb-rate) axis does once the
-# controller is centered on the target. Both modes center the target in the
-# image the same way (X-Y IBVS cascade); they differ only in the vertical:
+# Mission mode -- what the vertical (thrust/climb-rate) axis does. LAND and
+# PERCH center the target in the image the same way (X-Y IBVS cascade) and
+# differ only in the vertical, gated on lateral centering:
 #   MODE_LAND  down-facing camera, target BELOW: descend onto it, then disarm
 #              (real touchdown). Uses the range hint (point.z) as height.
 #   MODE_PERCH up-facing camera, branch ABOVE: climb toward it while centered.
 #              Range is ignored; there is no automatic terminal -- the safety
 #              pilot takes over manually once the vehicle is at the branch.
+# MODE_HOVER is different in kind, not just direction: it holds a FIXED,
+# settable height (~hover_height) via closed-loop PID against ODOMETRY
+# altitude (last_odom -- needs ~use_optitrack, see there), UNGATED by
+# lateral centering -- Z and X-Y run completely independently. This is for
+# BENCH-TESTING the X-Y cascade alone: lock the vehicle at a known height
+# and watch it center on the target without Z ever moving. Not yet a
+# general-purpose mode -- no settable climb/descend RATE (e.g. cm/s) exists
+# yet, just a fixed altitude setpoint.
 MODE_LAND = 'land'
 MODE_PERCH = 'perch'
+MODE_HOVER = 'hover'
 
 # How the desired tilt reaches the FCU (~command_mode).
 #   CMD_ATTITUDE  send the target ATTITUDE (quaternion) and let ArduPilot's
@@ -321,10 +334,11 @@ class IbvsController:
         self.control_rate = rospy.get_param('~control_rate', 20.0)
         self.dt = 1.0 / self.control_rate
 
-        # Mission mode: 'land' (down cam, descend + disarm) or 'perch'
-        # (up cam, climb toward the branch). See MODE_* above.
+        # Mission mode: 'land' (down cam, descend + disarm), 'perch' (up cam,
+        # climb toward the branch), or 'hover' (bench test: hold a fixed
+        # height, X-Y IBVS runs independently). See MODE_* above.
         self.mission_mode = rospy.get_param('~mission_mode', MODE_LAND)
-        if self.mission_mode not in (MODE_LAND, MODE_PERCH):
+        if self.mission_mode not in (MODE_LAND, MODE_PERCH, MODE_HOVER):
             rospy.logwarn("ibvs_controller: unknown mission_mode '%s', "
                           "falling back to '%s'", self.mission_mode, MODE_LAND)
             self.mission_mode = MODE_LAND
@@ -364,6 +378,25 @@ class IbvsController:
         self.thrust_min = rospy.get_param('~thrust_min', 0.35)
         self.thrust_max = rospy.get_param('~thrust_max', 0.7)
         self.takeoff_height = rospy.get_param('~takeoff_height', 2.0)
+
+        # MODE_HOVER: fixed height setpoint [m], odometry altitude (needs
+        # ~use_optitrack). Set to the same value as ~takeoff_height for a
+        # clean test -- otherwise CLIMB overshoots/undershoots this target
+        # and the height PID has a step correction to make right at handoff
+        # (harmless, just an avoidable transient).
+        self.hover_height = rospy.get_param('~hover_height', 1.0)
+        kp_z = rospy.get_param('~pid_z/kp', 0.1)
+        ki_z = rospy.get_param('~pid_z/ki', 0.0)
+        kd_z = rospy.get_param('~pid_z/kd', 0.15)
+        i_max_z = rospy.get_param('~pid_z/i_max', 0.05)
+        # UNTESTED -- these are conservative starting guesses (see the
+        # module docstring's tuning notes for pid_xy for how that was done;
+        # this has had none of that yet). Bench/tether test before trusting
+        # it: hand-hold or tie the vehicle down and watch the commanded
+        # thrust track a step change in ~hover_height before flying free.
+        self.pid_z = Pid(kp_z, ki_z, kd_z,
+                         self.thrust_min - self.hover_thrust,
+                         self.thrust_max - self.hover_thrust, i_max_z)
         # descend/climb only while laterally centered on the tag, in PIXELS:
         # moving vertically off-center shrinks the camera FOV faster than the
         # X-Y loop converges and the tag falls out of frame (flight-tested).
@@ -405,6 +438,18 @@ class IbvsController:
         # asymmetry.
         self.image_width = rospy.get_param('~image_width', 1280)
         self.image_height = rospy.get_param('~image_height', 720)
+
+        # Altitude source switch (startup/optitrack vs startup/real_world).
+        # last_odom (ONLY used for altitude -- see the note where it's
+        # declared) normally comes from mavros/local_position/odom, which
+        # needs an EKF POSITION fix and never publishes with no GPS / no
+        # mocap fed into the FCU. When OptiTrack is running, subscribe
+        # DIRECTLY to vrpn_client/estimated_odometry instead (published by
+        # uav_ros_general's optitrack.launch / ros_vrpn_client, no relay
+        # node in between) -- a straight either/or, not a fallback: if this
+        # is true but OptiTrack has not connected yet, altitude simply
+        # stays unknown, same as the no-fix case today.
+        self.use_optitrack = rospy.get_param('~use_optitrack', False)
 
         # Desired lateral offset as a frame-fraction; 0.0 = dead centre.
         # The centre is subtracted by the normalization, so 0 IS the centre
@@ -517,7 +562,9 @@ class IbvsController:
         # AHRS estimate and needs no position solution, so it is available
         # with no GPS and no OptiTrack -- which is exactly why odom cannot be
         # used for this (it requires an EKF POSITION fix and never publishes
-        # here). last_odom is still kept, but ONLY for altitude.
+        # here, UNLESS ~use_optitrack redirects it to vrpn_client/estimated_odometry --
+        # see where that param is read). last_odom is still kept, but ONLY
+        # for altitude, regardless of which topic feeds it.
         self.last_imu = None
         self.last_odom = None
         # Yaw commanded in attitude mode: latched from the IMU on entering
@@ -557,7 +604,9 @@ class IbvsController:
 
         rospy.Subscriber('mavros/state', State, self.mavros_state_callback, queue_size=1)
         rospy.Subscriber('ibvs/target_point', PointStamped, self.target_callback, queue_size=1)
-        rospy.Subscriber('mavros/local_position/odom', Odometry,
+        odom_topic = ('vrpn_client/estimated_odometry' if self.use_optitrack
+                     else 'mavros/local_position/odom')
+        rospy.Subscriber(odom_topic, Odometry,
                          self.odom_callback, queue_size=1)
         rospy.Subscriber('mavros/imu/data', Imu, self.imu_callback, queue_size=1)
 
@@ -864,6 +913,12 @@ class IbvsController:
         if self.state == CLIMB:
             return self.climb_thrust
 
+        # HOVER: fixed height setpoint, completely independent of X-Y --
+        # overrides LAND/PERCH's thrust logic in every other state. See
+        # compute_height_hold_thrust and the MODE_HOVER note above.
+        if self.mission_mode == MODE_HOVER:
+            return self.compute_height_hold_thrust()
+
         # PERCH: the branch is ABOVE (up camera). Climb toward it, but only
         # while laterally centered -- climbing off-center drifts the branch
         # out of the shrinking FOV, same funnel logic as the landing descent.
@@ -888,6 +943,31 @@ class IbvsController:
 
         # WAIT_ARM (ignored while disarmed) and TAG_LOST: hold altitude.
         return self.hover_thrust
+
+    def compute_height_hold_thrust(self):
+        """MODE_HOVER: regulate to a FIXED height (~hover_height) via
+        closed-loop PID against odometry altitude -- UNGATED by lateral
+        centering, unlike LAND/PERCH (Z and X-Y run independently on
+        purpose, so X-Y can be bench-tested with Z locked still).
+
+        Requires last_odom (~use_optitrack; see where that's read) for a
+        real altitude. Without it, there is nothing to regulate against --
+        falls back to hover_thrust with a warning, same graceful "no fix"
+        degradation as the rest of the Z logic.
+        """
+        if self.last_odom is None:
+            rospy.logwarn_throttle(
+                2.0, "ibvs_controller: mission_mode 'hover' but no odometry "
+                     "altitude (last_odom is None) -- sending hover_thrust "
+                     "instead of holding %.2f m; is ~use_optitrack set and "
+                     "is OptiTrack actually connected?", self.hover_height)
+            return self.hover_thrust
+
+        height = self.last_odom.pose.pose.position.z
+        height_rate = self.last_odom.twist.twist.linear.z
+        error = self.hover_height - height
+        delta = self.pid_z.update(error, -height_rate, self.dt)
+        return self.hover_thrust + delta
 
     def maybe_land_disarm(self):
         """LAND terminal: once centered and low enough, disarm (touchdown).

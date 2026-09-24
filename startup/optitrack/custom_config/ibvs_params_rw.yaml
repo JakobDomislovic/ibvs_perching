@@ -1,9 +1,22 @@
-# ibvs_controller.py parameters -- REAL WORLD (startup/real_world).
+# ibvs_controller.py parameters -- OPTITRACK VARIANT (startup/optitrack).
+#
+# Identical tuning to startup/real_world -- see that directory's copy of this
+# file for the full history behind every value below; every gain here means
+# exactly what it means there. The only difference in this startup is the
+# ALTITUDE SOURCE: start_optitrack.sh passes use_optitrack:=true to
+# ibvs_udp.launch, so the controller subscribes DIRECTLY to
+# vrpn_client/estimated_odometry (no relay node in between) for its
+# altitude (takeoff_height, hover_height, land_disarm_height -- X-Y is
+# unaffected, that is still pure image-error IBVS), instead of
+# mavros/local_position/odom, which never gets a real fix with no GPS / no
+# mocap fed into the FCU (see ibvs_controller.py). The same vrpn_client
+# topic can also just be watched directly (RViz / PlotJuggler / rostopic
+# echo), independent of whether the controller is using it.
 #
 # Off-board detection: the PiOS companion detects the target and streams its
 # pixel position over UDP; udp_target_receiver republishes ibvs/target_point
 # and this controller flies ArduPilot directly (mavros/setpoint_raw/attitude).
-# There is NO range sensor and NO OptiTrack -- the vertical axis is open-rate.
+# There is NO range sensor -- the vertical axis is open-rate.
 #
 # The safety pilot flies MANUALLY (STABILIZE). The controller streams
 # setpoints continuously; ArduPilot only acts on them in GUIDED_NOGPS, and
@@ -17,10 +30,9 @@
 # ---------------------------------------------------------------------------
 # Mission mode: 'land' (down cam, descend + disarm), 'perch' (up cam, climb
 # toward the branch), or 'hover' (BENCH TEST: hold hover_height via
-# closed-loop PID -- see pid_z below -- independent of X-Y). 'hover' NEEDS A
-# REAL ALTITUDE SOURCE: this startup does not set use_optitrack, so
-# last_odom stays None here and 'hover' would just sit on hover_thrust with
-# a warning -- use startup/optitrack for an actually-working hover test.
+# closed-loop PID -- see pid_z below -- completely independent of X-Y, so
+# the IBVS cascade can be characterized with Z locked at a known height;
+# needs use_optitrack:=true, i.e. this startup, not startup/real_world).
 # Override per run from the launch (mission_mode:=perch / mission_mode:=hover).
 #
 # CURRENTLY: LAND. To go back to PERCH, three things move together --
@@ -76,9 +88,11 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 
-hover_height: 1.0             # [m] mission_mode 'hover' ONLY (needs
-                              # use_optitrack -- see above): the fixed height
-                              # target held via pid_z below.
+hover_height: 1.0             # [m] mission_mode 'hover' ONLY: the fixed height
+                              # target held via pid_z below. Set equal to
+                              # takeoff_height for a clean test, otherwise
+                              # CLIMB over/undershoots this and pid_z has an
+                              # avoidable step correction to make at handoff.
 
 perch_climb_thrust: 0.55      # PERCH: constant climb while centered on the branch
 land_descend_thrust: 0.45     # LAND: constant slow descent while centered
@@ -221,11 +235,14 @@ pid_xy:
 
 # ---------------------------------------------------------------------------
 # mission_mode 'hover' ONLY -- closed-loop height PID toward hover_height,
-# via odometry altitude (last_odom, needs use_optitrack -- unavailable in
-# this startup, see above). UNTESTED: conservative starting guesses, not
-# flight-derived like pid_xy above. Bench/tether test first: hand-hold or
-# tie the vehicle down and watch the commanded thrust track a step change
-# in hover_height before ever flying it free.
+# via odometry altitude (last_odom, needs use_optitrack -- see above).
+# UNTESTED: these are conservative starting guesses, not flight-derived like
+# pid_xy above (which has none of that history yet either). Bench/tether
+# test first: hand-hold or tie the vehicle down and watch the commanded
+# thrust track a step change in hover_height before ever flying it free.
+# Units: kp/ki/kd are thrust-units of climb-rate command per meter (or
+# m/s, or m*s) of height error -- same structure as pid_xy, just against a
+# fixed setpoint instead of a moving detection.
 # ---------------------------------------------------------------------------
 pid_z:
   kp: 0.1                      # [thrust/m] 1 m of error -> +0.1 thrust

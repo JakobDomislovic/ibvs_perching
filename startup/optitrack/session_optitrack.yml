@@ -1,0 +1,68 @@
+name: ibvs_perching_optitrack
+root: ./
+startup_window: ibvs
+# All settings come from start_optitrack.sh (fcu_url, mission_mode,
+# namespace, bind_port, image_width/height, optitrack_ip, object_name) --
+# DO NOT edit them here, edit start_optitrack.sh.
+pre_window: export UAV_NAMESPACE=<%= @settings["namespace"] %> && source ./shell_helpers.sh
+
+
+windows:
+  - stack:
+      layout: tiled
+      panes:
+        - roscore
+        # mavros straight from ibvs_perching (config/apm_config.yaml).
+        - waitForRos; roslaunch ibvs_perching mavros_apm.launch fcu_url:=<%= @settings["fcu_url"] %>
+        # GUID_OPTIONS 0 => thrust is a CLIMB RATE (0.5 hover). GUID_OPTIONS 8
+        # (raw thrust) makes this controller fly away! Then bump stream rates.
+        - waitForRos; waitForMavros; waitForParams;
+          setParam GUID_OPTIONS 0;
+          rosrun mavros mavsys -n $UAV_NAMESPACE/mavros rate --all 50
+        - waitForRos; rosbag record -a
+  - odometry:
+      layout: tiled
+      panes:
+        # OptiTrack. The controller (ibvs window) subscribes to
+        # vrpn_client/estimated_odometry DIRECTLY -- see use_optitrack:=true
+        # below -- no relay node in between. Needs uav_ros_general +
+        # ros_vrpn_client on the ROS_PACKAGE_PATH (the only place this
+        # startup needs them).
+        - waitForRos; roslaunch uav_ros_general optitrack.launch
+          object_name:=<%= @settings["object_name"] %>
+          ip:=<%= @settings["optitrack_ip"] %>
+        # just watch it directly (RViz / PlotJuggler could point here too)
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/vrpn_client/estimated_odometry/pose/pose
+  - ibvs:
+      layout: tiled
+      panes:
+        # UDP receiver (PiOS pixel position -> ibvs/target_point) + controller.
+        # mission_mode + camera resolution + port all come from start_optitrack.sh.
+        # use_optitrack:=true is what makes this startup different from
+        # real_world: the controller reads its altitude from
+        # vrpn_client/estimated_odometry (odometry window) instead of
+        # mavros/local_position/odom. Subscribing before that window has
+        # connected is harmless -- altitude just reads as unavailable until
+        # it does, same as the no-fix case this replaces.
+        - waitForRos; waitForMavros;
+          roslaunch ibvs_perching ibvs_udp.launch
+          config:=$(pwd)/custom_config/ibvs_params_rw.yaml
+          mission_mode:=<%= @settings["mission_mode"] %>
+          bind_port:=<%= @settings["bind_port"] %>
+          image_width:=<%= @settings["image_width"] %>
+          image_height:=<%= @settings["image_height"] %>
+          use_optitrack:=true
+        # single lightweight monitor: the IBVS state machine
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/error
+        # commanded attitude: x=roll y=pitch z=yaw [rad] (ibvs/pid_roll and
+        # ibvs/pid_pitch carry the P/I/D split; plot those rather than echo)
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/control_angles
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
+  - reboot:
+      layout: tiled
+      panes:
+        - |
+          history -s "rosservice call /mavros/cmd/command \"{broadcast: false, command: 246, confirmation: 0, param1: 1.0, param2: 0.0, param3: 0.0, param4: 0.0, param5: 0.0, param6: 0.0, param7: 0.0}\""

@@ -6,7 +6,8 @@
        branch (perching), and streams the target's pixel error + range over
        UDP. udp_target_receiver republishes that as ibvs/target_point and the
        IBVS controller flies ArduPilot directly through
-       mavros/setpoint_raw/attitude (NO OptiTrack, NO uav_ros_stack tracker).
+       mavros/setpoint_raw/attitude (NO uav_ros_stack tracker; OptiTrack is
+       optional, see use_optitrack below, off by default).
 
        This launch does NOT start mavros; bring it up separately (e.g.
        mavros_apm.launch). Two modes, pick one:
@@ -37,6 +38,14 @@
   <arg name="image_width"  default="1280"/>
   <arg name="image_height" default="720"/>
 
+  <!-- Altitude source (startup/optitrack). OFF by default: the controller
+       reads mavros/local_position/odom, which needs an EKF POSITION fix and
+       never publishes with no GPS / no mocap fed into the FCU (see
+       ibvs_controller.py). When true, it reads ibvs/optitrack_odom instead
+       (published by scripts/optitrack_relay.py from OptiTrack): an
+       either/or switch, not a fallback. -->
+  <arg name="use_optitrack" default="false"/>
+
   <group ns="$(arg namespace)">
 
     <!-- UDP receiver: PiOS detection -> ibvs/target_point (the raw pixel
@@ -59,6 +68,7 @@
       <param name="mission_mode" value="$(arg mission_mode)"/>
       <param name="image_width"  value="$(arg image_width)"/>
       <param name="image_height" value="$(arg image_height)"/>
+      <param name="use_optitrack" value="$(arg use_optitrack)"/>
     </node>
 
   </group>
