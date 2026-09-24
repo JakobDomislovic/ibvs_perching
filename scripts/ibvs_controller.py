@@ -597,6 +597,16 @@ class IbvsController:
         # mavros/imu/data to see the tracking error.
         self.angles_pub = rospy.Publisher(
             'ibvs/control_angles', PointStamped, queue_size=1)
+        # Z axis (thrust = climb-rate command), see publish_debug:
+        #   ibvs/thrust  x = commanded, y = hover_thrust, z = x - y
+        #   ibvs/pid_z   x/y/z = P/I/D of the height-hold PID
+        #   ibvs/height  x = setpoint, y = measured, z = error [m]
+        self.thrust_pub = rospy.Publisher(
+            'ibvs/thrust', PointStamped, queue_size=1)
+        self.pid_z_pub = rospy.Publisher(
+            'ibvs/pid_z', PointStamped, queue_size=1)
+        self.height_pub = rospy.Publisher(
+            'ibvs/height', PointStamped, queue_size=1)
 
         # latch the initial state too -- transitions alone would leave the
         # topic silent until the first state change
@@ -910,6 +920,9 @@ class IbvsController:
 
     def compute_thrust(self):
         """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
+        # only compute_height_hold_thrust fills these in; zero them for every
+        # other branch so ibvs/pid_z never shows a stale value
+        self.pid_z.zero_terms()
         if self.state == CLIMB:
             return self.climb_thrust
 
@@ -1105,7 +1118,7 @@ class IbvsController:
         thrust = self.compute_thrust()
         desired_roll, desired_pitch = self.compute_desired_tilt()
         self.publish_setpoint(desired_roll, desired_pitch, thrust)
-        self.publish_debug(desired_roll, desired_pitch)
+        self.publish_debug(desired_roll, desired_pitch, thrust)
         if self.mission_mode == MODE_LAND:
             self.maybe_land_disarm()
 
@@ -1176,7 +1189,7 @@ class IbvsController:
             return self.yaw_setpoint
         return att[2] if att is not None else None
 
-    def publish_debug(self, desired_roll, desired_pitch):
+    def publish_debug(self, desired_roll, desired_pitch, thrust):
         """Debug topics, published every control tick.
 
         ibvs/pid_roll, ibvs/pid_pitch  (PointStamped, RADIANS)
@@ -1192,6 +1205,21 @@ class IbvsController:
             mode this is exactly what the published quaternion encodes, so it
             can be plotted straight against mavros/imu/data to read off the
             tracking error. Yaw is the held heading, not a servoed axis.
+
+        ibvs/thrust  (PointStamped, normalized 0..1 climb-rate command)
+            x = thrust actually sent in AttitudeTarget.thrust,
+            y = hover_thrust (the zero-climb baseline, 0.5 with GUID_OPTIONS 0),
+            z = x - y: > 0 commands a climb, < 0 a descent. In mission_mode
+            'hover' z is the height-hold PID's correction AFTER its clamp.
+
+        ibvs/pid_z  (PointStamped, thrust units)
+            x = P term, y = I term, z = D term of the height-hold PID, BEFORE
+            the thrust_min/thrust_max clamp. Only non-zero in mission_mode
+            'hover' with odometry, the only case where that PID runs.
+
+        ibvs/height  (PointStamped, METERS)
+            x = hover_height setpoint, y = odometry altitude, z = x - y.
+            y and z are NaN while there is no odometry (no OptiTrack).
         """
         now = rospy.Time.now()
 
@@ -1211,6 +1239,31 @@ class IbvsController:
         yaw = self.commanded_yaw(self.current_attitude())
         ang.point.z = yaw if yaw is not None else 0.0     # gamma
         self.angles_pub.publish(ang)
+
+        th = PointStamped()
+        th.header.stamp = now
+        th.point.x = thrust
+        th.point.y = self.hover_thrust
+        th.point.z = thrust - self.hover_thrust
+        self.thrust_pub.publish(th)
+
+        pz = PointStamped()
+        pz.header.stamp = now
+        pz.point.x = self.pid_z.p_term
+        pz.point.y = self.pid_z.i_term
+        pz.point.z = self.pid_z.d_term
+        self.pid_z_pub.publish(pz)
+
+        h = PointStamped()
+        h.header.stamp = now
+        h.point.x = self.hover_height
+        if self.last_odom is not None:
+            h.point.y = self.last_odom.pose.pose.position.z
+            h.point.z = self.hover_height - h.point.y
+        else:
+            h.point.y = float('nan')
+            h.point.z = float('nan')
+        self.height_pub.publish(h)
 
 
 if __name__ == '__main__':

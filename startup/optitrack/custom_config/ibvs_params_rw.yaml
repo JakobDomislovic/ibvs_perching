@@ -42,7 +42,7 @@
 #       explicit <param> AFTER the <rosparam> load, so this yaml alone does
 #       NOT take effect; start_udp.sh wins.
 # ---------------------------------------------------------------------------
-mission_mode: land
+mission_mode: hover
 
 # Image->body sign per axis. The controller ASSUMES point.x positive RIGHT and
 # point.y positive DOWN (ordinary top-left-origin image convention, which the

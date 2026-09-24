@@ -328,7 +328,9 @@ or a constant `land_descend_thrust` while centred for landing, clamped to
 **Publishes:** `mavros/setpoint_raw/attitude` (`mavros_msgs/AttitudeTarget`),
 `ibvs/state` (latched `String`), `ibvs/error` (`PointStamped`),
 `ibvs/control_angles` (`PointStamped` — x=roll, y=pitch, z=yaw [rad]),
-`ibvs/pid_roll` and `ibvs/pid_pitch` (the P/I/D split, for plotting)
+`ibvs/pid_roll` and `ibvs/pid_pitch` (the P/I/D split, for plotting),
+`ibvs/thrust` (x=commanded, y=hover_thrust, z=x−y), `ibvs/pid_z` (height-hold
+P/I/D, `hover` mode only), `ibvs/height` (x=setpoint, y=odometry z, z=error [m])
 
 Key parameters (all in `ibvs_params_rw.yaml` unless noted):
 

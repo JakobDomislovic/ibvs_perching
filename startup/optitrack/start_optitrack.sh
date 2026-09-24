@@ -48,7 +48,7 @@ IMAGE_HEIGHT=720                 # [px] frame height the detector reports in
 
 # OptiTrack -- the controller's altitude source in this startup (see the
 # header comment above).
-OPTITRACK_IP=192.168.1.50        # OptiTrack/Motive VRPN server IP
+OPTITRACK_IP=192.168.0.50        # OptiTrack/Motive VRPN server IP
 OBJECT_NAME=$UAV_NAMESPACE       # rigid-body name registered in Motive
 # ---------------------------------------------------------------------------
 
