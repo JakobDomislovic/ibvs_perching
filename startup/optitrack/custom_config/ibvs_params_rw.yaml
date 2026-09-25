@@ -76,6 +76,14 @@ engage_on_target: true        # skip CLIMB and servo straight away once armed
                               # switch the mode: the PILOT selects
                               # GUIDED_NOGPS and ibvs/start enables servoing.
 
+# OptiTrack HEIGHT -> FCU (mavros/vision_pose/pose), so ArduPilot's climb-rate
+# loop uses the real height instead of its EKF's (which followed a junk indoor
+# GPS fix in 2026-09-25-12-30-26.bag). x/y are sent as 0 -- height only.
+# FCU must have: VISO_TYPE 1, EK3_SRC1_POSZ 6, EK3_SRC1_POSXY 0,
+# EK3_SRC1_VELXY 0, EK3_SRC1_VELZ 0, EK3_SRC1_YAW 1 (reboot after VISO_TYPE).
+send_vision_height: true
+vision_height_rate: 30.0      # [Hz] OptiTrack runs ~200 Hz; this throttles it
+
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
 
 # ---------------------------------------------------------------------------
@@ -245,8 +253,8 @@ pid_xy:
 # fixed setpoint instead of a moving detection.
 # ---------------------------------------------------------------------------
 pid_z:
-  kp: 0.1                      # [thrust/m] 1 m of error -> +0.1 thrust
-  ki: 0.0                      # OFF -- enable only once the sign/direction
+  kp: 0.05                    # [thrust/m] 1 m of error -> +0.1 thrust
+  ki: 0.0001                      # OFF -- enable only once the sign/direction
                               # is confirmed on the bench (same reasoning
                               # as pid_xy/ki above)
   kd: 0.15                     # [thrust per m/s] damps the approach so it

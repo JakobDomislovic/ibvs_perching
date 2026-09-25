@@ -19,7 +19,7 @@ windows:
         - waitForRos; waitForMavros; waitForParams;
           setParam GUID_OPTIONS 0;
           rosrun mavros mavsys -n $UAV_NAMESPACE/mavros rate --all 50
-        - waitForRos; rosbag record -a
+        #- waitForRos; rosbag record -a
   - odometry:
       layout: tiled
       panes:

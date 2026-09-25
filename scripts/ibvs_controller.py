@@ -223,7 +223,7 @@ import math
 
 import rospy
 import tf.transformations as tft
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
 from mavros_msgs.msg import AttitudeTarget, State
@@ -451,6 +451,21 @@ class IbvsController:
         # stays unknown, same as the no-fix case today.
         self.use_optitrack = rospy.get_param('~use_optitrack', False)
 
+        # Forward the OptiTrack HEIGHT to the FCU as a vision pose
+        # (mavros/vision_pose/pose -> VISION_POSITION_ESTIMATE), so ArduPilot's
+        # own climb-rate loop -- the one the thrust field commands -- runs on
+        # a correct height instead of its EKF's. Indoors that EKF followed a
+        # junk GPS fix (alt jumping 136-160 m) and flew the vehicle UP at
+        # 0.2 m/s while we commanded max descent (2026-09-25-12-30-26.bag).
+        # HEIGHT ONLY: x/y are sent as 0 and the orientation is the FCU's own
+        # AHRS attitude, so nothing but z carries OptiTrack information.
+        # Needs use_optitrack, and on the FCU: VISO_TYPE 1, EK3_SRC1_POSZ 6,
+        # EK3_SRC1_POSXY 0, EK3_SRC1_VELXY 0, EK3_SRC1_VELZ 0, EK3_SRC1_YAW 1.
+        self.send_vision_height = rospy.get_param('~send_vision_height', False)
+        vision_rate = rospy.get_param('~vision_height_rate', 30.0)
+        self.vision_period = 1.0 / vision_rate
+        self.last_vision_sent = None
+
         # Desired lateral offset as a frame-fraction; 0.0 = dead centre.
         # The centre is subtracted by the normalization, so 0 IS the centre
         # here (unlike the pixel-aim-point scheme this replaces).
@@ -574,6 +589,8 @@ class IbvsController:
 
         self.setpoint_pub = rospy.Publisher(
             'mavros/setpoint_raw/attitude', AttitudeTarget, queue_size=1)
+        self.vision_pose_pub = rospy.Publisher(
+            'mavros/vision_pose/pose', PoseStamped, queue_size=1)
         self.state_pub = rospy.Publisher('ibvs/state', String, queue_size=1, latch=True)
         # Pixel error the loop is actually working on: detection minus the aim
         # point, in raw pixels, published on every detection so it can be
@@ -778,6 +795,32 @@ class IbvsController:
 
     def odom_callback(self, msg):
         self.last_odom = msg
+        if self.send_vision_height and self.use_optitrack:
+            self.publish_vision_height(msg)
+
+    def publish_vision_height(self, odom):
+        """OptiTrack height -> FCU, rate-limited to ~vision_height_rate.
+
+        OptiTrack streams at ~200 Hz; ArduPilot's vision input wants tens of
+        Hz, so this throttles. Skipped until the first IMU message, since the
+        orientation field is filled from the FCU's own attitude.
+        """
+        if self.last_imu is None:
+            return
+        now = rospy.Time.now()
+        if (self.last_vision_sent is not None and
+                (now - self.last_vision_sent).to_sec() < self.vision_period):
+            return
+        self.last_vision_sent = now
+
+        pose = PoseStamped()
+        pose.header.stamp = odom.header.stamp
+        pose.header.frame_id = 'map'
+        pose.pose.position.x = 0.0
+        pose.pose.position.y = 0.0
+        pose.pose.position.z = odom.pose.pose.position.z
+        pose.pose.orientation = self.last_imu.orientation
+        self.vision_pose_pub.publish(pose)
 
     def imu_callback(self, msg):
         self.last_imu = msg
