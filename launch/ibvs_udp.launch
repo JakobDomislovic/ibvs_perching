@@ -46,6 +46,12 @@
        either/or switch, not a fallback. -->
   <arg name="use_optitrack" default="false"/>
 
+  <!-- What AttitudeTarget.thrust means: 'climb_rate' (FCU GUID_OPTIONS 0,
+       default) or 'raw' motor throttle (GUID_OPTIONS 8; needs
+       mission_mode:=hover and use_optitrack:=true). The FCU parameter MUST
+       match; the startup sessions set both from one setting. -->
+  <arg name="thrust_mode" default="climb_rate"/>
+
   <group ns="$(arg namespace)">
 
     <!-- UDP receiver: PiOS detection -> ibvs/target_point (the raw pixel
@@ -69,6 +75,7 @@
       <param name="image_width"  value="$(arg image_width)"/>
       <param name="image_height" value="$(arg image_height)"/>
       <param name="use_optitrack" value="$(arg use_optitrack)"/>
+      <param name="thrust_mode" value="$(arg thrust_mode)"/>
     </node>
 
   </group>

@@ -98,6 +98,15 @@ ArduCopter interprets `thrust` as a **normalized climb-rate command** — unless
 > **flies away at a constant climb** (flight-tested: ~5.4 m/s, straight past
 > 300 m). The `session_udp.yml` startup therefore runs `setParam GUID_OPTIONS 0`
 > before launching the controller — set it back for the normal MPC stack.
+>
+> **Exception — `startup/optitrack` with `THRUST_MODE=raw`** (the default
+> there). That session sets `GUID_OPTIONS 8` on purpose and the controller
+> sends real throttle: `raw_hover_throttle` (= `MOT_THST_HOVER`) plus a PID on
+> OptiTrack height. Needed because in climb-rate mode ArduPilot holds height on
+> its own EKF, which indoors follows a junk GPS fix, and this firmware has no
+> `VISO_TYPE` to fuse OptiTrack into it. Raw mode is only allowed with
+> `mission_mode hover` + OptiTrack, and the controller will not engage until
+> it reads `GUID_OPTIONS = 8` back from the FCU.
 
 Two command modes for the lateral axes, selected by `~command_mode`:
 

@@ -217,6 +217,11 @@ Thrust ("climb rate") per state, mission_mode 'land' / 'perch':
 mission_mode 'hover' overrides ALL of the above except CLIMB: every other
 state runs the height-hold PID toward ~hover_height instead, regardless of
 X-Y alignment -- see MODE_HOVER above and compute_thrust.
+
+~thrust_mode 'raw' (startup/optitrack only; FCU GUID_OPTIONS 8) sends motor
+THROTTLE instead of a climb rate: raw_hover_throttle + pid_z_raw on OptiTrack
+height, so ArduPilot's own EKF-height loop is out of the picture. See
+THRUST_* below for why, and check_fcu_params for the GUID_OPTIONS interlock.
 """
 
 import math
@@ -227,7 +232,7 @@ from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
 from mavros_msgs.msg import AttitudeTarget, State
-from mavros_msgs.srv import CommandBool, SetMode
+from mavros_msgs.srv import CommandBool, ParamGet, SetMode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
 
@@ -270,6 +275,25 @@ MODE_HOVER = 'hover'
 CMD_ATTITUDE = 'attitude'
 CMD_RATE = 'rate'
 
+# What AttitudeTarget.thrust means to the FCU (~thrust_mode). MUST match the
+# FCU's GUID_OPTIONS, which the startup session sets from the same setting.
+#   THRUST_CLIMB_RATE  GUID_OPTIONS 0: thrust is a climb-rate request (0.5 =
+#                      hold). ArduPilot closes that loop on its OWN EKF
+#                      height, which indoors follows a junk GPS fix -- and
+#                      this firmware (Copter-Larics-4.3.3) has no VISO_TYPE,
+#                      so OptiTrack cannot be fed into that EKF. Result:
+#                      the slow +-0.4 m / ~23 s height swing of
+#                      2026-09-25-13-01-46.bag.
+#   THRUST_RAW         GUID_OPTIONS 8: thrust goes straight to the motors
+#                      (hover ~0.14 measured on this vehicle), so the height PID
+#                      below is the ONLY height loop and it runs on
+#                      OptiTrack. Requires mission_mode 'hover' +
+#                      use_optitrack -- the open-rate land/perch constants
+#                      (0.45 / 0.55) would be raw throttle here.
+THRUST_CLIMB_RATE = 'climb_rate'
+THRUST_RAW = 'raw'
+GUID_OPTIONS_FOR = {THRUST_CLIMB_RATE: 0, THRUST_RAW: 8}
+
 
 def clamp(value, low, high):
     return max(low, min(high, value))
@@ -311,10 +335,13 @@ class Pid:
         self.i_term = 0.0
         self.d_term = 0.0
 
-    def update(self, error, error_dot, dt):
+    def update(self, error, error_dot, dt, integrate=True):
+        """integrate=False freezes the integral (still applied, not grown):
+        conditional integration, so a large transient cannot wind it up."""
         i_term = 0.0
         if self.ki > 0.0:
-            self.integral += error * dt
+            if integrate:
+                self.integral += error * dt
             # anti-windup: keep the integral contribution bounded
             self.integral = clamp(self.integral,
                                   -self.i_max / self.ki, self.i_max / self.ki)
@@ -397,6 +424,48 @@ class IbvsController:
         self.pid_z = Pid(kp_z, ki_z, kd_z,
                          self.thrust_min - self.hover_thrust,
                          self.thrust_max - self.hover_thrust, i_max_z)
+
+        # RAW thrust (see THRUST_* above). Separate gains from pid_z on
+        # purpose: there the output is a climb-rate request, here it is
+        # motor throttle, so the same number means something very different.
+        self.thrust_mode = rospy.get_param('~thrust_mode', THRUST_CLIMB_RATE)
+        if self.thrust_mode not in GUID_OPTIONS_FOR:
+            raise rospy.ROSInitException(
+                "ibvs_controller: unknown thrust_mode '%s'" % self.thrust_mode)
+        # The throttle this vehicle REALLY hovers at (vfr_hud/throttle in a
+        # STABILIZE hover). Must be within raw_thrust_margin of the truth or
+        # height cannot be held; the I term only trims the rest. NOT
+        # necessarily MOT_THST_HOVER, which can be stale (0.18 on this
+        # vehicle vs a measured 0.13-0.15).
+        self.raw_hover_throttle = rospy.get_param('~raw_hover_throttle', 0.133)
+        # the height PID may move throttle at most this far from hover
+        self.raw_thrust_margin = rospy.get_param('~raw_thrust_margin', 0.04)
+        # OptiTrack older than this -> hold hover + the learned trim only
+        self.raw_odom_timeout = rospy.get_param('~raw_odom_timeout', 0.2)
+        self.pid_z_raw = Pid(rospy.get_param('~pid_z_raw/kp', 0.035),
+                             rospy.get_param('~pid_z_raw/ki', 0.01),
+                             rospy.get_param('~pid_z_raw/kd', 0.04),
+                             -self.raw_thrust_margin, self.raw_thrust_margin,
+                             rospy.get_param('~pid_z_raw/i_max', 0.035))
+        # Big engagements (2026-09-29-13-38-32.bag: switched in at 2.1-2.7 m
+        # or 0.4 m) pinned the PID at its throttle limit for ~1 s, the vehicle
+        # fell/climbed at up to 1.3 m/s, overshot 0.14-0.47 m, and the
+        # integral wound to ~4x its steady value, so it then crept back for
+        # 8-10 s. Near the target the loop held +-2 cm. Two fixes, P/D kept:
+        #   ramp   the setpoint starts at the height where the pilot engaged
+        #          and moves to hover_height at this speed, so the PID only
+        #          ever sees a small tracking error
+        #   the integral is frozen while the ramp is moving, so it only
+        #          learns the steady trim, not the transient. NOT gated on
+        #          error size: a battery-sag hover error leaves a standing
+        #          offset of (hover error)/kp, e.g. 0.2 m at +0.007, and a
+        #          size gate smaller than that would never let I remove it
+        #          (simulated: stuck 0.2 m low with a 0.15 m gate).
+        self.hover_ramp_speed = rospy.get_param('~hover_ramp_speed', 0.3)
+        # ramped height setpoint [m]; None = not engaged (re-seeded from the
+        # current height on the next engagement)
+        self.z_ref = None
+        self.raw_mode = self.thrust_mode == THRUST_RAW
         # descend/climb only while laterally centered on the tag, in PIXELS:
         # moving vertically off-center shrinks the camera FOV faster than the
         # X-Y loop converges and the tag falls out of frame (flight-tested).
@@ -465,6 +534,25 @@ class IbvsController:
         vision_rate = rospy.get_param('~vision_height_rate', 30.0)
         self.vision_period = 1.0 / vision_rate
         self.last_vision_sent = None
+
+        # Raw thrust is only safe where every thrust value comes from the
+        # OptiTrack height PID: anything else (land/perch constants, the
+        # 0.5 "hover" of the climb-rate convention) is far above hover
+        # throttle and climbs away (README: ~5.4 m/s, flight-tested).
+        if self.raw_mode and not (self.mission_mode == MODE_HOVER and
+                                  self.use_optitrack):
+            raise rospy.ROSInitException(
+                "ibvs_controller: thrust_mode 'raw' needs mission_mode 'hover' "
+                "AND use_optitrack (got mission_mode '%s', use_optitrack %s)"
+                % (self.mission_mode, self.use_optitrack))
+        # Thrust that means "no vertical correction" in the active mode.
+        self.neutral_thrust = (self.raw_hover_throttle if self.raw_mode
+                               else self.hover_thrust)
+        # FCU GUID_OPTIONS as last read back (None = not known yet). In raw
+        # mode engagement is REFUSED until it reads 8 -- see
+        # check_fcu_params / update_state_machine.
+        self.fcu_guid_options = None
+        self.fcu_hover_throttle = None
 
         # Desired lateral offset as a frame-fraction; 0.0 = dead centre.
         # The centre is subtracted by the normalization, so 0 IS the centre
@@ -582,6 +670,7 @@ class IbvsController:
         # for altitude, regardless of which topic feeds it.
         self.last_imu = None
         self.last_odom = None
+        self.last_odom_time = None
         # Yaw commanded in attitude mode: latched from the IMU on entering
         # ALIGN so the vehicle holds the heading it engaged at. None means
         # "track the current yaw", i.e. never ask for a yaw change.
@@ -644,10 +733,76 @@ class IbvsController:
         rospy.Service('ibvs/start', Trigger, self.handle_start)
         rospy.Service('ibvs/stop', Trigger, self.handle_stop)
 
+        self.param_get_srv = rospy.ServiceProxy('mavros/param/get', ParamGet)
+
         rospy.Timer(rospy.Duration(1.0 / self.control_rate), self.control_loop)
+        rospy.Timer(rospy.Duration(2.0), self.check_fcu_params)
+
+    def fcu_param(self, name):
+        """Read one FCU parameter from mavros' cache, or None if unavailable."""
+        try:
+            res = self.param_get_srv(param_id=name)
+        except (rospy.ServiceException, rospy.ROSException):
+            return None
+        if not res.success:
+            return None
+        return res.value.integer if res.value.integer != 0 else res.value.real
+
+    def check_fcu_params(self, _event):
+        """Read back GUID_OPTIONS (and MOT_THST_HOVER in raw mode) and shout
+        if they disagree with ~thrust_mode / ~raw_hover_throttle.
+
+        GUID_OPTIONS decides what the thrust field MEANS, so a mismatch is
+        the fly-away (climb-rate 0.5 read as raw throttle) or a sink (raw
+        ~0.14 read as a descent request). The session sets it from the same
+        THRUST_MODE setting; this catches it not having stuck.
+        """
+        guid = self.fcu_param('GUID_OPTIONS')
+        if guid is not None:
+            self.fcu_guid_options = int(guid)
+        want = GUID_OPTIONS_FOR[self.thrust_mode]
+        if self.fcu_guid_options is None:
+            rospy.logwarn_throttle(
+                10.0, "ibvs_controller: cannot read GUID_OPTIONS from the FCU "
+                      "yet (want %d for thrust_mode '%s')%s", want,
+                self.thrust_mode,
+                " -- engagement BLOCKED until it reads back" if self.raw_mode else "")
+        elif self.fcu_guid_options != want:
+            rospy.logerr_throttle(
+                5.0, "ibvs_controller: FCU GUID_OPTIONS is %d but thrust_mode "
+                     "'%s' needs %d -- thrust would be misread by the FCU!%s",
+                self.fcu_guid_options, self.thrust_mode, want,
+                " Engagement BLOCKED." if self.raw_mode else "")
+
+        if self.raw_mode:
+            hover = self.fcu_param('MOT_THST_HOVER')
+            if hover is not None and hover != self.fcu_hover_throttle:
+                self.fcu_hover_throttle = hover
+                rospy.loginfo("ibvs_controller: FCU MOT_THST_HOVER = %.3f "
+                              "(raw_hover_throttle = %.3f)",
+                              hover, self.raw_hover_throttle)
+            if (self.fcu_hover_throttle is not None and
+                    abs(self.fcu_hover_throttle - self.raw_hover_throttle) > 0.03):
+                rospy.logwarn_throttle(
+                    30.0, "ibvs_controller: raw_hover_throttle %.3f differs from "
+                          "FCU MOT_THST_HOVER %.3f -- fine if raw_hover_throttle "
+                          "was MEASURED (vfr_hud/throttle in a hover), since "
+                          "MOT_THST_HOVER can be stale", self.raw_hover_throttle,
+                    self.fcu_hover_throttle)
+
+    def raw_thrust_ok(self):
+        """Raw mode may engage only once the FCU is confirmed on GUID_OPTIONS 8."""
+        return self.fcu_guid_options == GUID_OPTIONS_FOR[THRUST_RAW]
 
     def handle_takeoff(self, _req):
         """Full takeoff sequence: GUIDED_NOGPS -> arm -> CLIMB -> HOVER."""
+        if self.raw_mode:
+            # CLIMB sends the fixed climb_thrust, which as RAW throttle is a
+            # hard climb. Raw mode is pilot-takeoff + engage_on_target only.
+            return TriggerResponse(
+                success=False,
+                message="ibvs/takeoff is disabled in thrust_mode 'raw' -- take "
+                        "off manually and select GUIDED_NOGPS")
         if self.state != WAIT_ARM:
             return TriggerResponse(
                 success=False,
@@ -795,6 +950,9 @@ class IbvsController:
 
     def odom_callback(self, msg):
         self.last_odom = msg
+        # receive time, not header.stamp: staleness must not depend on the
+        # OptiTrack PC's clock agreeing with ours
+        self.last_odom_time = rospy.Time.now()
         if self.send_vision_height and self.use_optitrack:
             self.publish_vision_height(msg)
 
@@ -902,6 +1060,10 @@ class IbvsController:
             # detection at +56.4s, 5.7s after the pilot had already given up
             # and gone back to STABILIZE). Now the mode switch alone engages,
             # and a missing detection simply means TAG_LOST until one arrives.
+            elif self.raw_mode and not self.raw_thrust_ok():
+                # Never engage raw thrust on an FCU not confirmed to read it
+                # as raw thrust (see check_fcu_params for the loud part).
+                pass
             elif self.engage_on_target and self.engage_armed:
                 self.servo_active = True
                 self.transition(ALIGN if self.tag_is_fresh() else TAG_LOST)
@@ -972,6 +1134,8 @@ class IbvsController:
         # HOVER: fixed height setpoint, completely independent of X-Y --
         # overrides LAND/PERCH's thrust logic in every other state. See
         # compute_height_hold_thrust and the MODE_HOVER note above.
+        if self.raw_mode:
+            return self.compute_raw_height_thrust()
         if self.mission_mode == MODE_HOVER:
             return self.compute_height_hold_thrust()
 
@@ -1024,6 +1188,69 @@ class IbvsController:
         error = self.hover_height - height
         delta = self.pid_z.update(error, -height_rate, self.dt)
         return self.hover_thrust + delta
+
+    def compute_raw_height_thrust(self):
+        """THRUST_RAW: motor throttle = hover + PID(OptiTrack height).
+
+        The only height loop in the system -- ArduPilot passes this straight
+        to the motors, so there is no second loop on the FCU's (wrong) EKF
+        height to fight. D uses OptiTrack's own vertical velocity.
+
+        The setpoint is RAMPED (z_ref): seeded with the height at engagement
+        and moved toward hover_height at hover_ramp_speed, so a far-off
+        engagement is a gentle, bounded-speed approach instead of a
+        saturated PID. D is on the tracking-error rate (ramp rate - vz), so
+        it does not brake against the ramp itself.
+
+        Only integrates while engaged (not WAIT_ARM): while the pilot flies
+        STABILIZE the FCU ignores this value, and an integral built up then
+        would be dumped into the handover -- and even then only once the
+        ramp has arrived (frozen while z_ref moves). Stale
+        OptiTrack holds hover plus the trim learned so far (never the last
+        P/D, which may be large) and freezes the ramp.
+        """
+        self.pid_z_raw.zero_terms()
+        if self.state == WAIT_ARM:
+            # The integral is KEPT (not reset): it is the learned hover trim
+            # (battery sag), it only grows while engaged, and starting the
+            # next engagement from it avoids re-learning it through a
+            # standing error every time (2026-09-29: -0.004..-0.012, the
+            # same each engagement). Bounded by pid_z_raw/i_max.
+            self.z_ref = None
+            return self.raw_hover_throttle
+
+        odom = self.last_odom
+        age = (None if odom is None else
+               (rospy.Time.now() - self.last_odom_time).to_sec())
+        if odom is None or age > self.raw_odom_timeout:
+            rospy.logerr_throttle(
+                1.0, "ibvs_controller: RAW thrust with no fresh OptiTrack "
+                     "(age %s) -- holding hover throttle + trim, PILOT TAKE "
+                     "OVER", "none" if age is None else "%.2fs" % age)
+            trim = self.pid_z_raw.ki * self.pid_z_raw.integral
+            return self.raw_hover_throttle + trim
+
+        height = odom.pose.pose.position.z
+        height_rate = odom.twist.twist.linear.z
+
+        if self.z_ref is None:
+            self.z_ref = height
+            rospy.loginfo("ibvs_controller: height hold engaged at %.2f m, "
+                          "ramping to %.2f m at %.2f m/s", height,
+                          self.hover_height, self.hover_ramp_speed)
+        step = self.hover_ramp_speed * self.dt
+        gap = self.hover_height - self.z_ref
+        ref_rate = 0.0
+        if abs(gap) > step:
+            self.z_ref += math.copysign(step, gap)
+            ref_rate = math.copysign(self.hover_ramp_speed, gap)
+        else:
+            self.z_ref = self.hover_height
+
+        error = self.z_ref - height
+        delta = self.pid_z_raw.update(error, ref_rate - height_rate, self.dt,
+                                      integrate=(ref_rate == 0.0))
+        return self.raw_hover_throttle + delta
 
     def maybe_land_disarm(self):
         """LAND terminal: once centered and low enough, disarm (touchdown).
@@ -1160,7 +1387,12 @@ class IbvsController:
         self.update_state_machine()
         thrust = self.compute_thrust()
         desired_roll, desired_pitch = self.compute_desired_tilt()
-        self.publish_setpoint(desired_roll, desired_pitch, thrust)
+        # Raw mode on an FCU not confirmed at GUID_OPTIONS 8: send NOTHING.
+        # Any thrust value is wrong for one of the two meanings, whereas no
+        # setpoints makes GUIDED_NOGPS time out (GUID_TIMEOUT) to level with
+        # zero climb rate -- the safest thing the FCU can do on its own.
+        if not self.raw_mode or self.raw_thrust_ok():
+            self.publish_setpoint(desired_roll, desired_pitch, thrust)
         self.publish_debug(desired_roll, desired_pitch, thrust)
         if self.mission_mode == MODE_LAND:
             self.maybe_land_disarm()
@@ -1251,17 +1483,20 @@ class IbvsController:
 
         ibvs/thrust  (PointStamped, normalized 0..1 climb-rate command)
             x = thrust actually sent in AttitudeTarget.thrust,
-            y = hover_thrust (the zero-climb baseline, 0.5 with GUID_OPTIONS 0),
-            z = x - y: > 0 commands a climb, < 0 a descent. In mission_mode
-            'hover' z is the height-hold PID's correction AFTER its clamp.
+            y = the neutral value: hover_thrust (0.5, zero climb rate) in
+                thrust_mode 'climb_rate', raw_hover_throttle in 'raw',
+            z = x - y: > 0 pushes up, < 0 down. In mission_mode 'hover' z is
+            the height-hold PID's correction AFTER its clamp.
 
         ibvs/pid_z  (PointStamped, thrust units)
-            x = P term, y = I term, z = D term of the height-hold PID, BEFORE
-            the thrust_min/thrust_max clamp. Only non-zero in mission_mode
-            'hover' with odometry, the only case where that PID runs.
+            x = P term, y = I term, z = D term of the height-hold PID
+            (pid_z, or pid_z_raw in thrust_mode 'raw'), BEFORE its clamp.
+            Only non-zero in mission_mode 'hover' with odometry.
 
         ibvs/height  (PointStamped, METERS)
-            x = hover_height setpoint, y = odometry altitude, z = x - y.
+            x = height setpoint (the RAMPED one, z_ref, while thrust_mode
+                'raw' is engaged; hover_height otherwise),
+            y = odometry altitude, z = x - y.
             y and z are NaN while there is no odometry (no OptiTrack).
         """
         now = rospy.Time.now()
@@ -1286,20 +1521,21 @@ class IbvsController:
         th = PointStamped()
         th.header.stamp = now
         th.point.x = thrust
-        th.point.y = self.hover_thrust
-        th.point.z = thrust - self.hover_thrust
+        th.point.y = self.neutral_thrust
+        th.point.z = thrust - self.neutral_thrust
         self.thrust_pub.publish(th)
 
         pz = PointStamped()
         pz.header.stamp = now
-        pz.point.x = self.pid_z.p_term
-        pz.point.y = self.pid_z.i_term
-        pz.point.z = self.pid_z.d_term
+        pid_z = self.pid_z_raw if self.raw_mode else self.pid_z
+        pz.point.x = pid_z.p_term
+        pz.point.y = pid_z.i_term
+        pz.point.z = pid_z.d_term
         self.pid_z_pub.publish(pz)
 
         h = PointStamped()
         h.header.stamp = now
-        h.point.x = self.hover_height
+        h.point.x = self.z_ref if self.z_ref is not None else self.hover_height
         if self.last_odom is not None:
             h.point.y = self.last_odom.pose.pose.position.z
             h.point.z = self.hover_height - h.point.y

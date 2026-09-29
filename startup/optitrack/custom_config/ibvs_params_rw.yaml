@@ -81,7 +81,10 @@ engage_on_target: true        # skip CLIMB and servo straight away once armed
 # GPS fix in 2026-09-25-12-30-26.bag). x/y are sent as 0 -- height only.
 # FCU must have: VISO_TYPE 1, EK3_SRC1_POSZ 6, EK3_SRC1_POSXY 0,
 # EK3_SRC1_VELXY 0, EK3_SRC1_VELZ 0, EK3_SRC1_YAW 1 (reboot after VISO_TYPE).
-send_vision_height: true
+# DOES NOTHING ON THIS VEHICLE: its firmware (Copter-Larics-4.3.3) has no
+# VISO_TYPE parameter, i.e. it was built without visual odometry and drops
+# VISION_POSITION_ESTIMATE (checked 2026-09-29). Kept for a future firmware.
+send_vision_height: false
 vision_height_rate: 30.0      # [Hz] OptiTrack runs ~200 Hz; this throttles it
 
 control_rate: 30.0            # [Hz] rate at which AttitudeTarget is published
@@ -96,7 +99,7 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 
-hover_height: 1.0             # [m] mission_mode 'hover' ONLY: the fixed height
+hover_height: 1.5             # [m] mission_mode 'hover' ONLY: the fixed height
                               # target held via pid_z below. Set equal to
                               # takeoff_height for a clean test, otherwise
                               # CLIMB over/undershoots this and pid_z has an
@@ -260,6 +263,56 @@ pid_z:
   kd: 0.15                     # [thrust per m/s] damps the approach so it
                               # doesn't overshoot hover_height and oscillate
   i_max: 0.05                  # [thrust] max integral contribution
+
+# ---------------------------------------------------------------------------
+# thrust_mode 'raw' ONLY (THRUST_MODE in start_optitrack.sh, which also sets
+# the FCU's GUID_OPTIONS to 8 to match). Thrust is then MOTOR THROTTLE, not a
+# climb rate, and this PID on OptiTrack height is the only height loop:
+#     throttle = raw_hover_throttle + PID(z_ref - z, dz_ref/dt - vz)
+# where z_ref ramps from the engagement height to hover_height (see
+# hover_ramp_speed below).
+# Why: with climb-rate thrust ArduPilot runs its own height loop on its EKF,
+# which indoors follows a junk GPS fix, and this firmware cannot take
+# OptiTrack into the EKF (no VISO_TYPE). See THRUST_* in ibvs_controller.py.
+#
+# raw_hover_throttle is THE critical number. The PID can only move throttle
+# raw_thrust_margin either side of it, so if the vehicle's real hover is
+# outside that band it cannot hold height at all -- set too HIGH it climbs
+# away, too LOW it sinks. It is NOT the FCU's MOT_THST_HOVER (0.18, stale):
+# the 2026-09-25 bags hovered at vfr_hud/throttle 0.13-0.15 (ArduPilot's own
+# throttle output, the same 0..1 scale a raw-thrust setpoint uses). Re-read it
+# after any battery/payload change: hover in STABILIZE and echo
+# mavros/vfr_hud/throttle.
+#
+# Gains are for a ~1.5 rad/s, well-damped loop with 1.0 throttle ~
+# g / hover (~70 m/s^2 here), i.e. kp = wn^2*hover/g, kd = 2*0.9*wn*hover/g.
+# They SCALE WITH hover -- if raw_hover_throttle changes a lot, scale them.
+# Simulated at hover 0.14: 0.5 m step settles to 5 cm in ~7 s, 0.12 m
+# overshoot; a real hover anywhere in 0.11-0.17 is still held (dips up to
+# ~0.7 m while the integrator catches up at the far ends).
+# Flight-tested 2026-09-29-13-38-32.bag: +-2 cm hold near 1 m; big
+# engagements were too fast, hence hover_ramp_speed + I frozen while ramping.
+# ---------------------------------------------------------------------------
+raw_hover_throttle: 0.133      # MEASURED hover (vfr_hud/throttle), see above
+raw_thrust_margin: 0.04       # max |throttle - hover| the PID may command
+                              # (~ +-0.3 g); also bounds how wrong the hover
+                              # value may be: covers a real hover of 0.10-0.18
+raw_odom_timeout: 0.2         # [s] OptiTrack older than this -> hover + trim
+hover_ramp_speed: 0.3         # [m/s] the setpoint starts at the height you
+                              # engage at and moves to hover_height at this
+                              # speed. 2026-09-29 engagements from 2.1-2.7 m
+                              # without it: 0.7-1.3 m/s drops, 0.14-0.47 m
+                              # undershoot, 8-10 s creep back.
+pid_z_raw:
+  kp: 0.035                   # [throttle/m]  0.5 m low -> +0.018 throttle
+  ki: 0.01                    # [throttle/(m*s)] trims a wrong hover throttle
+                              # / battery sag -- needed, not optional
+  kd: 0.04                    # [throttle per m/s] on OptiTrack vz
+  i_max: 0.035                # [throttle] max trim the integrator may add
+                              # The integral is FROZEN while the setpoint ramp
+                              # moves (see hover_ramp_speed): on the 2026-09-29
+                              # big engagements it wound to -0.025 vs a steady
+                              # -0.006, which caused the slow creep back.
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
