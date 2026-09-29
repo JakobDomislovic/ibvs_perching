@@ -14,6 +14,7 @@ catkin_package()
 catkin_install_python(PROGRAMS
   scripts/ibvs_controller.py
   scripts/udp_target_receiver.py
+  scripts/virtual_camera.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

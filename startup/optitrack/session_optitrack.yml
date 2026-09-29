@@ -1,7 +1,7 @@
 name: ibvs_perching_optitrack
 root: ./
 startup_window: ibvs
-# All settings come from start_optitrack.sh (fcu_url, mission_mode, thrust_mode,
+# All settings come from start_optitrack.sh (fcu_url, mission_mode, thrust_mode, compensate,
 # namespace, bind_port, image_width/height, optitrack_ip, object_name) --
 # DO NOT edit them here, edit start_optitrack.sh.
 pre_window: export UAV_NAMESPACE=<%= @settings["namespace"] %> && source ./shell_helpers.sh
@@ -57,9 +57,14 @@ windows:
           image_height:=<%= @settings["image_height"] %>
           use_optitrack:=true
           thrust_mode:=<%= @settings["thrust_mode"] %>
+          virtual_camera:=true
+          compensate:=<%= @settings["compensate"] %>
         # single lightweight monitor: the IBVS state machine
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
+        # same detection as a LEVEL camera would see it (virtual_camera.py);
+        # the controller uses it only with COMPENSATE=true
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point_virtual
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/error
         # commanded attitude: x=roll y=pitch z=yaw [rad] (ibvs/pid_roll and
         # ibvs/pid_pitch carry the P/I/D split; plot those rather than echo)

@@ -315,6 +315,37 @@ pid_z_raw:
                               # -0.006, which caused the slow creep back.
 
 # ---------------------------------------------------------------------------
+# Virtual level camera (scripts/virtual_camera.py) -- removes the image motion
+# caused by roll/pitch, in real time from the IMU (exact rotation, see that
+# file). It needs only what describes the HARDWARE: how the camera is mounted
+# and its intrinsics at the detector's resolution. Nothing here is fitted
+# from flight data.
+#
+# start_optitrack.sh always runs it (SHADOW: ibvs/target_point_virtual next
+# to the raw point, both in the bag); the controller flies on it only with
+# COMPENSATE=true there.
+# ---------------------------------------------------------------------------
+camera:
+  mount: auto                 # auto = from mission_mode (perch -> up, else
+                              # down) | down | up | custom (+ R_BC: 9 numbers,
+                              # row-major, body <- camera)
+  # INTRINSICS AT image_width x image_height (1280x720, the resolution the
+  # detector reports px/py in). Best: fx/fy/cx/cy from a checkerboard
+  # calibration AT THAT RESOLUTION -- when fx > 0 they override hfov_deg,
+  # and cx/cy default to the image centre.
+  #
+  # Until then, from the datasheet: DSJ-3079-HE (Sony IMX179), "76-degree
+  # field of view" (https://openelab.io/products/usb-camera-module-driver-free).
+  # ASSUMED to be the DIAGONAL of the 4:3 sensor, with 1280x720 using the
+  # full sensor width:  HFOV = 2*atan(4/5 * tan(76/2)) = 64.0 deg -> fx 1024 px.
+  # If the 16:9 mode crops the sensor instead, the true fx is larger and this
+  # UNDER-compensates (still in the right direction) -- the props-off tilt
+  # test shows it: e_virtual would still follow the tilt a little.
+  hfov_deg: 64.0
+  fx: 0.0                     # 0 = derive from hfov_deg
+  fy: 0.0                     # 0 = fx (square pixels)
+
+# ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)

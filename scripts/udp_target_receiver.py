@@ -9,6 +9,13 @@ VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
     point.y  vertical PIXEL POSITION of the detection in the image,
              positive DOWN, measured from the image origin (top-left)
     point.z  unused, always 0.0 (there is no range sensor)
+    header.stamp  the time the FRAME was taken, when the packet says how old
+             the frame was (optional field 'age', seconds, measured on the
+             detector's own clock: send time - frame time); otherwise the
+             arrival time. virtual_camera.py needs the frame time to use the
+             attitude the camera actually had; the controller ignores it.
+
+    Packet (JSON): {"px": ..., "py": ..., "age": ...}   ('age' optional)
 
 This node publishes the detected POINT, not an error: it forwards what the
 detector saw and does no geometry at all. The controller owns the setpoint
@@ -58,7 +65,8 @@ class UdpTargetReceiver:
                       "(publishing raw detected PIXEL POSITION)", ip, port)
 
     def parse(self, data):
-        """JSON datagram -> (px, py), the detection's WHOLE-pixel position.
+        """JSON datagram -> (px, py, age): the detection's WHOLE-pixel
+        position, and the frame's age in seconds (None if not sent).
 
         Accepts px/py (pixel position in the image) or error_x/error_y
         (already centre-relative); both are forwarded unchanged, the
@@ -76,12 +84,22 @@ class UdpTargetReceiver:
             py = float(d.get('error_y', 0.0))
         else:
             raise KeyError("packet has neither px/py nor error_x/error_y")
-        return int(round(px)), int(round(py))
+        age = None
+        if 'age' in d:
+            age = float(d['age'])
+            if not 0.0 <= age < 1.0:
+                # a frame age outside [0, 1) s is a detector clock/unit bug:
+                # keep the detection, but do not trust its timing
+                rospy.logwarn_throttle(
+                    5.0, "udp_target_receiver: implausible frame age %.3f s "
+                         "-- stamping with the arrival time" % age)
+                age = None
+        return int(round(px)), int(round(py)), age
 
-    def publish(self, px, py):
+    def publish(self, px, py, stamp):
         """Publish the detected pixel position -- no geometry applied."""
         msg = PointStamped()
-        msg.header.stamp = rospy.Time.now()
+        msg.header.stamp = stamp
         msg.header.frame_id = self.frame_id
         msg.point.x = float(px)
         msg.point.y = float(py)
@@ -92,6 +110,7 @@ class UdpTargetReceiver:
         while not rospy.is_shutdown():
             try:
                 data, _ = self.sock.recvfrom(65507)
+                arrival = rospy.Time.now()
             except socket.timeout:
                 continue
             except socket.error as exc:
@@ -99,12 +118,14 @@ class UdpTargetReceiver:
                 continue
 
             try:
-                px, py = self.parse(data)
+                px, py, age = self.parse(data)
             except (ValueError, KeyError, TypeError) as exc:
                 rospy.logwarn_throttle(5.0, "udp_target_receiver: bad packet: %s" % exc)
                 continue
 
-            self.publish(px, py)
+            # frame time = arrival - age (the LAN hop itself is < 1 ms)
+            stamp = arrival - rospy.Duration(age) if age else arrival
+            self.publish(px, py, stamp)
 
     def shutdown(self):
         self.sock.close()
