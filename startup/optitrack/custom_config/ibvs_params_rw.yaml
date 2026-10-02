@@ -158,7 +158,7 @@ command_mode: attitude
 # standing error is genuine steady state). That eats 1.44 deg = 72% of a 2 deg
 # budget, leaving only ~0.10 m/s2 to actually manoeuvre with. Fine for a slow
 # direction-check; raise to 3-5 deg if it cannot make headway.
-max_tilt: 0.035               # [rad] desired-tilt clamp (2.0 deg)
+max_tilt: 0.052               # [rad] desired-tilt clamp (3.0 deg; was 0.035 = 2 deg until 2026-10-02)
 
 # RATE mode only (ignored when command_mode is 'attitude').
 kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
@@ -220,12 +220,14 @@ pid_xy:
   # kp 0.14 with max_tilt 0.035 means the outer 3/4 of the frame just commands
   # a flat 2 deg and the last quarter is proportional. That is deliberate: full
   # (slow) authority while far out, gentle as it closes.
-  kp: 0.14                    # [rad per unit] 2 deg reached at 1/4-frame error
+  kp: 0.20                    # [rad per unit] was 0.14 until 2026-10-02 (tighter hold; kd 0.18)
   ki: 0.02                    # OFF for this test. Note pure P CANNOT remove the
                               # standing error above -- it needs a permanent
                               # offset to generate the tilt that balances drift.
                               # Set ~0.02 once the direction is confirmed.
-  kd: 0.09                    # OFF for this test. This is the braking term: it
+  kd: 0.18                    # was 0.09 until 2026-10-02: doubled for more damping of the
+                              # slow (~5 s) aligned wobble -- safe now that the D term sees
+                              # the VIRTUAL (tilt-compensated) error. OFF for this test (old note). This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
                               # with kd 0 expect overshoot on the way in.
   i_max: 0.025                 # [rad] max integral contribution -- this is the
@@ -341,9 +343,17 @@ camera:
   # If the 16:9 mode crops the sensor instead, the true fx is larger and this
   # UNDER-compensates (still in the right direction) -- the props-off tilt
   # test shows it: e_virtual would still follow the tilt a little.
-  hfov_deg: 64.0
-  fx: 0.0                     # 0 = derive from hfov_deg
-  fy: 0.0                     # 0 = fx (square pixels)
+  hfov_deg: 64.0              # datasheet fallback, unused while fx > 0
+  # MEASURED 2026-10-02 from 2026-10-02-12-08-33.bag: 2921 detections of the
+  # tag at the OptiTrack origin, fitted against the OptiTrack pose (residual
+  # median 13 px). fx = fy (square pixels); the free fit gave 968 / 904.
+  # The principal point is ~70 px BELOW the image centre (or, equivalently,
+  # the camera is pitched ~4 deg on its mount) -- with the old cx/cy = centre
+  # that alone put the hover ~10 cm off the tag at 1.5 m.
+  fx: 945.0
+  fy: 945.0
+  cx: 613.0
+  cy: 429.0
 
 # ---------------------------------------------------------------------------
 # State machine timing / thresholds
