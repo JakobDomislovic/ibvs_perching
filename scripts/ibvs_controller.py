@@ -222,6 +222,9 @@ X-Y alignment -- see MODE_HOVER above and compute_thrust.
 THROTTLE instead of a climb rate: raw_hover_throttle + pid_z_raw on OptiTrack
 height, so ArduPilot's own EKF-height loop is out of the picture. See
 THRUST_* below for why, and check_fcu_params for the GUID_OPTIONS interlock.
+With ~approach_enabled it also runs the APPROACH TEST: after approach_dwell_s
+ALIGNED at hover_height the height setpoint climbs slowly, only while ALIGNED
+(see APP_* below and approach_goal).
 """
 
 import math
@@ -293,6 +296,23 @@ CMD_RATE = 'rate'
 THRUST_CLIMB_RATE = 'climb_rate'
 THRUST_RAW = 'raw'
 GUID_OPTIONS_FOR = {THRUST_CLIMB_RATE: 0, THRUST_RAW: 8}
+
+# APPROACH TEST status (thrust_mode 'raw' only, ~approach_enabled), published
+# latched on ibvs/approach:
+#   OFF       feature disabled
+#   IDLE      not engaged (pilot has control)
+#   WAITING   engaged: reaching hover_height and waiting to be ALIGNED for
+#             approach_dwell_s without a break
+#   CLIMBING  height setpoint rising at approach_speed (only while ALIGNED)
+#   PAUSED    not ALIGNED (or target lost) -> holding the current height;
+#             back to CLIMBING as soon as it is ALIGNED again
+#   CEILING   reached approach_max_height -> holding there
+APP_OFF = 'OFF'
+APP_IDLE = 'IDLE'
+APP_WAITING = 'WAITING'
+APP_CLIMBING = 'CLIMBING'
+APP_PAUSED = 'PAUSED'
+APP_CEILING = 'CEILING'
 
 
 def clamp(value, low, high):
@@ -466,6 +486,34 @@ class IbvsController:
         # current height on the next engagement)
         self.z_ref = None
         self.raw_mode = self.thrust_mode == THRUST_RAW
+
+        # APPROACH TEST (raw mode): simulates the perching approach. Once the
+        # vehicle has been ALIGNED without a break for approach_dwell_s at
+        # hover_height, the height setpoint climbs at approach_speed -- but
+        # only while ALIGNED (it holds as soon as alignment or the target is
+        # lost, and resumes when ALIGNED again) and never above
+        # approach_max_height. The pilot ends it by leaving GUIDED_NOGPS; the
+        # next engagement starts over. Status: ibvs/approach (APP_* above).
+        self.approach_enabled = rospy.get_param('~approach_enabled', False)
+        self.approach_dwell_s = rospy.get_param('~approach_dwell_s', 5.0)
+        self.approach_speed = rospy.get_param('~approach_speed', 0.05)
+        self.approach_max_height = rospy.get_param('~approach_max_height', 2.0)
+        if self.approach_enabled and not self.raw_mode:
+            rospy.logwarn("ibvs_controller: approach_enabled is ignored -- the "
+                          "approach test only exists in thrust_mode 'raw'")
+            self.approach_enabled = False
+        if self.approach_enabled:
+            if self.approach_max_height <= self.hover_height:
+                raise rospy.ROSInitException(
+                    "ibvs_controller: approach_max_height (%.2f m) must be above "
+                    "hover_height (%.2f m)" % (self.approach_max_height,
+                                               self.hover_height))
+            if self.approach_speed <= 0.0 or self.approach_dwell_s < 0.0:
+                raise rospy.ROSInitException(
+                    "ibvs_controller: approach_speed must be > 0 and "
+                    "approach_dwell_s >= 0")
+        self.approach = APP_IDLE if self.approach_enabled else APP_OFF
+        self.approach_aligned_since = None
         # descend/climb only while laterally centered on the tag, in PIXELS:
         # moving vertically off-center shrinks the camera FOV faster than the
         # X-Y loop converges and the tag falls out of frame (flight-tested).
@@ -681,6 +729,9 @@ class IbvsController:
         self.vision_pose_pub = rospy.Publisher(
             'mavros/vision_pose/pose', PoseStamped, queue_size=1)
         self.state_pub = rospy.Publisher('ibvs/state', String, queue_size=1, latch=True)
+        # approach-test status (APP_* above), latched like ibvs/state
+        self.approach_pub = rospy.Publisher('ibvs/approach', String,
+                                            queue_size=1, latch=True)
         # Pixel error the loop is actually working on: detection minus the aim
         # point, in raw pixels, published on every detection so it can be
         # plotted straight against ibvs/target_point and the commanded rates.
@@ -717,6 +768,7 @@ class IbvsController:
         # latch the initial state too -- transitions alone would leave the
         # topic silent until the first state change
         self.state_pub.publish(String(data=self.state))
+        self.approach_pub.publish(String(data=self.approach))
 
         rospy.Subscriber('mavros/state', State, self.mavros_state_callback, queue_size=1)
         rospy.Subscriber('ibvs/target_point', PointStamped, self.target_callback, queue_size=1)
@@ -1202,6 +1254,10 @@ class IbvsController:
         saturated PID. D is on the tracking-error rate (ramp rate - vz), so
         it does not brake against the ramp itself.
 
+        With ~approach_enabled the ramp's goal and speed come from
+        approach_goal(): hover_height first, then -- after approach_dwell_s
+        ALIGNED -- a slow climb toward approach_max_height while ALIGNED.
+
         Only integrates while engaged (not WAIT_ARM): while the pilot flies
         STABILIZE the FCU ignores this value, and an integral built up then
         would be dumped into the handover -- and even then only once the
@@ -1217,6 +1273,9 @@ class IbvsController:
             # standing error every time (2026-09-29: -0.004..-0.012, the
             # same each engagement). Bounded by pid_z_raw/i_max.
             self.z_ref = None
+            self.approach_aligned_since = None
+            if self.approach_enabled:
+                self.set_approach(APP_IDLE, "not engaged")
             return self.raw_hover_throttle
 
         odom = self.last_odom
@@ -1238,19 +1297,83 @@ class IbvsController:
             rospy.loginfo("ibvs_controller: height hold engaged at %.2f m, "
                           "ramping to %.2f m at %.2f m/s", height,
                           self.hover_height, self.hover_ramp_speed)
-        step = self.hover_ramp_speed * self.dt
-        gap = self.hover_height - self.z_ref
+            if self.approach_enabled:
+                self.set_approach(APP_WAITING, "engaged at %.2f m" % height)
+        goal, speed = self.approach_goal()
+        step = speed * self.dt
+        gap = goal - self.z_ref
         ref_rate = 0.0
         if abs(gap) > step:
             self.z_ref += math.copysign(step, gap)
-            ref_rate = math.copysign(self.hover_ramp_speed, gap)
+            ref_rate = math.copysign(speed, gap)
         else:
-            self.z_ref = self.hover_height
+            self.z_ref = goal
 
         error = self.z_ref - height
         delta = self.pid_z_raw.update(error, ref_rate - height_rate, self.dt,
                                       integrate=(ref_rate == 0.0))
         return self.raw_hover_throttle + delta
+
+    def set_approach(self, new, why=''):
+        """Change the approach-test status; log and publish on change only."""
+        if new != self.approach:
+            rospy.loginfo("ibvs_controller: approach %s -> %s%s", self.approach,
+                          new, (" (%s)" % why) if why else "")
+            self.approach = new
+            self.approach_pub.publish(String(data=new))
+
+    def approach_goal(self):
+        """(goal height, ramp speed) for the height setpoint this tick.
+
+        Without ~approach_enabled: hover_height at hover_ramp_speed, i.e. the
+        plain height hold. With it, the APPROACH TEST (see APP_* at the top):
+          WAITING   hover_height at hover_ramp_speed; once z_ref has arrived
+                    and the state has been ALIGNED for approach_dwell_s
+                    without a break -> CLIMBING
+          CLIMBING  goal approach_max_height at approach_speed; leaving
+                    ALIGNED -> PAUSED, reaching the goal -> CEILING
+          PAUSED    goal = current z_ref (hold); ALIGNED again -> CLIMBING
+          CEILING   hold approach_max_height
+        The state used is the previous tick's: ALIGN/ALIGNED are decided in
+        compute_desired_tilt, which runs after this. One tick (33 ms) late is
+        irrelevant at approach speeds of cm/s.
+        """
+        if not self.approach_enabled:
+            return self.hover_height, self.hover_ramp_speed
+        now = rospy.Time.now()
+        aligned = self.state == ALIGNED
+
+        if self.approach == APP_WAITING:
+            at_hover = abs(self.z_ref - self.hover_height) < 1e-6
+            if aligned and at_hover:
+                if self.approach_aligned_since is None:
+                    self.approach_aligned_since = now
+                elif ((now - self.approach_aligned_since).to_sec() >=
+                      self.approach_dwell_s):
+                    self.set_approach(
+                        APP_CLIMBING, "ALIGNED %.1f s at %.2f m -> climbing at "
+                        "%.2f m/s, max %.2f m" % (
+                            self.approach_dwell_s, self.z_ref,
+                            self.approach_speed, self.approach_max_height))
+            else:
+                self.approach_aligned_since = None
+            if self.approach == APP_WAITING:
+                return self.hover_height, self.hover_ramp_speed
+
+        if self.approach == APP_CLIMBING:
+            if self.z_ref >= self.approach_max_height - 1e-6:
+                self.set_approach(APP_CEILING, "reached %.2f m -- holding" %
+                                  self.z_ref)
+            elif not aligned:
+                self.set_approach(APP_PAUSED, "%s -- holding %.2f m" %
+                                  (self.state, self.z_ref))
+        elif self.approach == APP_PAUSED and aligned:
+            self.set_approach(APP_CLIMBING, "ALIGNED again at %.2f m" %
+                              self.z_ref)
+
+        if self.approach in (APP_CLIMBING, APP_CEILING):
+            return self.approach_max_height, self.approach_speed
+        return self.z_ref, self.approach_speed        # PAUSED: hold
 
     def maybe_land_disarm(self):
         """LAND terminal: once centered and low enough, disarm (touchdown).

@@ -61,6 +61,8 @@ windows:
           compensate:=<%= @settings["compensate"] %>
         # single lightweight monitor: the IBVS state machine
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
+        # approach test status: IDLE / WAITING / CLIMBING / PAUSED / CEILING
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/approach
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
         # same detection as a LEVEL camera would see it (virtual_camera.py);
         # the controller uses it only with COMPENSATE=true

@@ -99,7 +99,7 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 
-hover_height: 1.5             # [m] mission_mode 'hover' ONLY: the fixed height
+hover_height: 1.3             # [m] mission_mode 'hover' ONLY: the fixed height
                               # target held via pid_z below. Set equal to
                               # takeoff_height for a clean test, otherwise
                               # CLIMB over/undershoots this and pid_z has an
@@ -220,12 +220,20 @@ pid_xy:
   # kp 0.14 with max_tilt 0.035 means the outer 3/4 of the frame just commands
   # a flat 2 deg and the last quarter is proportional. That is deliberate: full
   # (slow) authority while far out, gentle as it closes.
-  kp: 0.20                    # [rad per unit] was 0.14 until 2026-10-02 (tighter hold; kd 0.18)
-  ki: 0.02                    # OFF for this test. Note pure P CANNOT remove the
+  # 2026-10-08: kp .28 / ki .05 / kd .35 / d_filter .45 (tuned in simulation) flew WAY too aggressive
+  # (2026-10-08-08-33-12.bag): fast tilting + the ~50 ms late attitude in virtual_camera (no frame
+  # "age" from the detector yet) made the compensated point jump ~40 px, which the strong, barely
+  # filtered D term amplified. Back to the gains that flew well. Raise kd only once "age" is sent.
+  # 2026-10-08 BRANCH at hover_height 1.0 m: all three gains / 3. The loop gain in PIXELS scales with
+  # 1/(camera-to-target distance); the branch at 1.5 m already moved 1.6x more px per metre than the
+  # floor tag and orbited (2.9 s period, 2026-10-08-08-57-04.bag), and 1.0 m is closer still (~2.5-3.5x).
+  # Same kp:kd:ki ratio = same damping, just slower. Floor-tag-at-1.5 m values were kp .20 ki .03 kd .18.
+  kp: 0.10                    # [rad per unit]
+  ki: 0.011                   # OFF for this test (old note). Note pure P CANNOT remove the
                               # standing error above -- it needs a permanent
                               # offset to generate the tilt that balances drift.
                               # Set ~0.02 once the direction is confirmed.
-  kd: 0.18                    # was 0.09 until 2026-10-02: doubled for more damping of the
+  kd: 0.09                    # was 0.09 until 2026-10-02: doubled for more damping of the
                               # slow (~5 s) aligned wobble -- safe now that the D term sees
                               # the VIRTUAL (tilt-compensated) error. OFF for this test (old note). This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
@@ -295,7 +303,10 @@ pid_z:
 # Flight-tested 2026-09-29-13-38-32.bag: +-2 cm hold near 1 m; big
 # engagements were too fast, hence hover_ramp_speed + I frozen while ramping.
 # ---------------------------------------------------------------------------
-raw_hover_throttle: 0.133      # MEASURED hover (vfr_hud/throttle), see above
+raw_hover_throttle: 0.151     # WITH THE ADDED MASS: middle of the measured range 0.148 (fresh battery,
+                              # 2026-10-08-08-15-37) .. 0.159 (drained, 08-45-58). Was 0.148 (08:15 bag: thrust
+                              # 0.147-0.149 in the holds). Was 0.133 without it -- change back if
+                              # the mass comes off. Re-measure: scripts/hover_throttle_from_bag.py
 raw_thrust_margin: 0.04       # max |throttle - hover| the PID may command
                               # (~ +-0.3 g); also bounds how wrong the hover
                               # value may be: covers a real hover of 0.10-0.18
@@ -305,6 +316,22 @@ hover_ramp_speed: 0.3         # [m/s] the setpoint starts at the height you
                               # speed. 2026-09-29 engagements from 2.1-2.7 m
                               # without it: 0.7-1.3 m/s drops, 0.14-0.47 m
                               # undershoot, 8-10 s creep back.
+
+# APPROACH TEST (simulates the perching approach; thrust_mode 'raw' only).
+# Hover at hover_height; once ALIGNED for approach_dwell_s without a break,
+# the height setpoint climbs at approach_speed -- ONLY while ALIGNED: it holds
+# as soon as alignment or the target is lost and resumes when ALIGNED again --
+# and never above approach_max_height. The PILOT ends it (leave GUIDED_NOGPS);
+# the next engagement starts over. Status: rostopic echo ibvs/approach
+# (IDLE / WAITING / CLIMBING / PAUSED / CEILING).
+# NOTE for the floor branch: it was not detected below ~1.2 m
+# (2026-10-08-09-32-35.bag: 0 % at 0.8-1.2 m, 98 % at 1.4-1.6 m).
+approach_enabled: true
+approach_dwell_s: 5.0         # [s] continuously ALIGNED before the climb starts
+approach_speed: 0.05          # [m/s] climb rate of the setpoint (5 cm/s; the
+                              # X-Y loop needs 5-9 s to settle, so keep it slow)
+approach_max_height: 2.0      # [m] ceiling -- the setpoint stops and holds here.
+                              # OptiTrack loses the vehicle above ~2.5 m.
 pid_z_raw:
   kp: 0.035                   # [throttle/m]  0.5 m low -> +0.018 throttle
   ki: 0.01                    # [throttle/(m*s)] trims a wrong hover throttle
