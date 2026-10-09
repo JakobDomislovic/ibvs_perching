@@ -239,6 +239,7 @@ ALIGNED at hover_height the height setpoint climbs slowly, only while ALIGNED
 
 import collections
 import math
+import traceback
 
 import rospy
 import tf.transformations as tft
@@ -329,7 +330,6 @@ GUID_OPTIONS_FOR = {THRUST_CLIMB_RATE: 0, THRUST_RAW: 8}
 #   CLIMBING  height setpoint rising at approach_speed (only while ALIGNED)
 #   PAUSED    not ALIGNED (or target lost) -> holding the current height;
 #             back to CLIMBING as soon as it is ALIGNED again
-#   CEILING   reached approach_max_height -> holding there
 #   STRIKE / PUSH / PERCHED   mirror the states of the same name
 #   FAILED    strike timed out or the push found no contact force -> holding
 #             height and aligning; no more climbing until re-engaged
@@ -338,7 +338,6 @@ APP_IDLE = 'IDLE'
 APP_WAITING = 'WAITING'
 APP_CLIMBING = 'CLIMBING'
 APP_PAUSED = 'PAUSED'
-APP_CEILING = 'CEILING'
 APP_STRIKE = 'STRIKE'
 APP_PUSH = 'PUSH'
 APP_PERCHED = 'PERCHED'
@@ -532,23 +531,24 @@ class IbvsController:
         # vehicle has been ALIGNED without a break for approach_dwell_s at
         # hover_height, the height setpoint climbs at approach_speed -- but
         # only while ALIGNED (it holds as soon as alignment or the target is
-        # lost, and resumes when ALIGNED again) and never above
-        # approach_max_height. The pilot ends it by leaving GUIDED_NOGPS; the
+        # lost, and resumes when ALIGNED again) until STRIKE or contact; never
+        # above max_height. The pilot ends it by leaving GUIDED_NOGPS; the
         # next engagement starts over. Status: ibvs/approach (APP_* above).
         self.approach_enabled = rospy.get_param('~approach_enabled', False)
         self.approach_dwell_s = rospy.get_param('~approach_dwell_s', 5.0)
         self.approach_speed = rospy.get_param('~approach_speed', 0.05)
-        self.approach_max_height = rospy.get_param('~approach_max_height', 2.0)
+        # absolute SAFETY limit for the whole approach: neither CLIMBING nor
+        # STRIKE ever sets the height above it (lab: OptiTrack range, branch)
+        self.max_height = rospy.get_param('~max_height', 2.3)
         if self.approach_enabled and not self.raw_mode:
             rospy.logwarn("ibvs_controller: approach_enabled is ignored -- the "
                           "approach test only exists in thrust_mode 'raw'")
             self.approach_enabled = False
         if self.approach_enabled:
-            if self.approach_max_height <= self.hover_height:
+            if self.max_height <= self.hover_height:
                 raise rospy.ROSInitException(
-                    "ibvs_controller: approach_max_height (%.2f m) must be above "
-                    "hover_height (%.2f m)" % (self.approach_max_height,
-                                               self.hover_height))
+                    "ibvs_controller: max_height (%.2f m) must be above "
+                    "hover_height (%.2f m)" % (self.max_height, self.hover_height))
             if self.approach_speed <= 0.0 or self.approach_dwell_s < 0.0:
                 raise rospy.ROSInitException(
                     "ibvs_controller: approach_speed must be > 0 and "
@@ -562,7 +562,6 @@ class IbvsController:
         self.strike_align_px = rospy.get_param('~strike_align_px', 50.0)
         self.strike_confirm_s = rospy.get_param('~strike_confirm_s', 0.2)
         self.strike_speed = rospy.get_param('~strike_speed', 0.15)
-        self.strike_max_height = rospy.get_param('~strike_max_height', 2.3)
         self.strike_timeout_s = rospy.get_param('~strike_timeout_s', 4.0)
         # time-to-contact from the target's apparent size (point.z, px)
         self.ttc_window_s = rospy.get_param('~ttc_window_s', 1.0)
@@ -592,16 +591,11 @@ class IbvsController:
             if self.strike_trigger not in (STRIKE_TTC, STRIKE_HEIGHT, STRIKE_OFF):
                 raise rospy.ROSInitException(
                     "ibvs_controller: strike_trigger must be ttc, height or off")
-            if self.strike_max_height <= self.approach_max_height:
-                raise rospy.ROSInitException(
-                    "ibvs_controller: strike_max_height (%.2f m) must be above "
-                    "approach_max_height (%.2f m)" % (self.strike_max_height,
-                                                      self.approach_max_height))
             if (self.strike_trigger == STRIKE_HEIGHT and
-                    not self.hover_height < self.strike_height <= self.approach_max_height):
+                    not self.hover_height < self.strike_height < self.max_height):
                 raise rospy.ROSInitException(
-                    "ibvs_controller: strike_height must be above hover_height "
-                    "and not above approach_max_height")
+                    "ibvs_controller: strike_height must be between hover_height "
+                    "and max_height")
             if not 0.0 < self.strike_speed <= 1.0:
                 raise rospy.ROSInitException(
                     "ibvs_controller: strike_speed must be in (0, 1] m/s")
@@ -909,8 +903,19 @@ class IbvsController:
 
         self.param_get_srv = rospy.ServiceProxy('mavros/param/get', ParamGet)
 
+        # control loop health: the loop must NEVER go silent. 2026-10-09-12-
+        # 10-20.bag: an exception inside the control timer silently killed
+        # its thread (rospy prints it to the terminal only), no setpoints
+        # went out any more, and the vehicle drifted 1.1 m in GUIDED until
+        # the pilot took over. Now every error is caught and logged to rosout
+        # (so it is in the bag), and a SAFE setpoint is sent instead; the
+        # watchdog covers a loop that HANGS instead of throwing.
+        self.loop_errors = 0
+        self.last_loop_time = rospy.Time.now()
+        self.watchdog_timeout_s = rospy.get_param('~watchdog_timeout_s', 0.3)
         rospy.Timer(rospy.Duration(1.0 / self.control_rate), self.control_loop)
         rospy.Timer(rospy.Duration(2.0), self.check_fcu_params)
+        rospy.Timer(rospy.Duration(0.1), self.watchdog)
 
     def fcu_param(self, name):
         """Read one FCU parameter from mavros' cache, or None if unavailable."""
@@ -1387,7 +1392,8 @@ class IbvsController:
 
         With ~approach_enabled the ramp's goal and speed come from
         approach_goal(): hover_height first, then -- after approach_dwell_s
-        ALIGNED -- a slow climb toward approach_max_height while ALIGNED.
+        ALIGNED -- a slow climb while ALIGNED, then STRIKE (never above
+        max_height).
 
         Only integrates while engaged (not WAIT_ARM): while the pilot flies
         STABILIZE the FCU ignores this value, and an integral built up then
@@ -1475,17 +1481,17 @@ class IbvsController:
         Pure: the approach status is decided in update_approach(), which runs
         earlier in the same control tick.
           plain hold / WAITING   hover_height at hover_ramp_speed
-          state CLIMBING         approach_max_height at approach_speed
-          state STRIKE           strike_max_height at strike_speed
+          state CLIMBING         max_height at approach_speed
+          state STRIKE           max_height at strike_speed
           FAILED                 back to where STRIKE started, hover_ramp_speed
-          anything else          hold z_ref (PAUSED, CEILING)
+          anything else          hold z_ref (PAUSED)
         """
         if not self.approach_enabled or self.approach == APP_WAITING:
             return self.hover_height, self.hover_ramp_speed
         if self.state == STRIKE:
-            return self.strike_max_height, self.strike_speed
-        if self.state == CLIMBING and self.approach in (APP_CLIMBING, APP_CEILING):
-            return self.approach_max_height, self.approach_speed
+            return self.max_height, self.strike_speed
+        if self.state == CLIMBING and self.approach == APP_CLIMBING:
+            return self.max_height, self.approach_speed
         if self.approach == APP_FAILED and self.fail_height is not None:
             return self.fail_height, self.hover_ramp_speed
         return self.z_ref, self.approach_speed
@@ -1556,25 +1562,19 @@ class IbvsController:
                     self.start_climbing(now, "ALIGNED %.1f s at %.2f m -> "
                                         "climbing at %.2f m/s, max %.2f m" % (
                                             self.approach_dwell_s, self.z_ref,
-                                            self.approach_speed,
-                                            self.approach_max_height))
+                                            self.approach_speed, self.max_height))
             else:
                 self.approach_aligned_since = None
         elif self.approach == APP_PAUSED:
             if st == ALIGNED:
                 self.start_climbing(now, "ALIGNED again at %.2f m" % self.z_ref)
-        elif self.approach in (APP_CLIMBING, APP_CEILING):
+        elif self.approach == APP_CLIMBING:
             if st != CLIMBING:
                 self.set_approach(APP_PAUSED, "%s -- holding %.2f m" %
                                   (st, self.z_ref))
                 self.climb_steady_since = None
                 self.strike_ok_since = None
                 return
-            if (self.approach == APP_CLIMBING and
-                    self.z_ref >= self.approach_max_height - 1e-6):
-                self.set_approach(APP_CEILING, "reached %.2f m -- holding" %
-                                  self.z_ref)
-                self.climb_steady_since = None
             why = self.strike_ready(now)
             if why:
                 self.transition(STRIKE)
@@ -1582,7 +1582,7 @@ class IbvsController:
                 self.strike_start_height = self.z_ref
                 self.set_approach(APP_STRIKE, "%s -> striking at %.2f m/s, "
                                   "max %.2f m" % (why, self.strike_speed,
-                                                  self.strike_max_height))
+                                                  self.max_height))
 
     def start_climbing(self, now, why):
         self.transition(CLIMBING)
@@ -1635,7 +1635,11 @@ class IbvsController:
     def expansion_rate(self, now):
         """d ln(size)/dt [1/s] of the target's apparent size over
         ttc_window_s (least squares), or None. Time-to-contact = 1/rate."""
-        pts = [((t - now).to_sec(), math.log(sz)) for t, sz in self.size_hist
+        # list(deque) is ONE atomic C call: iterating the deque itself while
+        # target_callback (another thread) appends to it raises "deque
+        # mutated during iteration" -- the suspected cause of the control
+        # loop dying in 2026-10-09-12-10-20.bag
+        pts = [((t - now).to_sec(), math.log(sz)) for t, sz in list(self.size_hist)
                if (now - t).to_sec() <= self.ttc_window_s]
         if len(pts) < self.ttc_min_samples:
             return None
@@ -1667,7 +1671,8 @@ class IbvsController:
     def publish_closeness(self, now):
         m = PointStamped()
         m.header.stamp = now
-        m.point.x = self.size_hist[-1][1] if self.size_hist else 0.0
+        hist = list(self.size_hist)
+        m.point.x = hist[-1][1] if hist else 0.0
         rate = self.expansion_rate(now)
         m.point.y = 1.0 / rate if rate is not None and rate > 1e-3 else float('nan')
         d = self.distance_estimate(now)
@@ -1741,7 +1746,8 @@ class IbvsController:
         return False
 
     def mean_contact_force(self, now, window_s):
-        vals = [f for t, f in self.contact_hist if (now - t).to_sec() <= window_s]
+        vals = [f for t, f in list(self.contact_hist)
+                if (now - t).to_sec() <= window_s]
         return sum(vals) / len(vals) if vals else 0.0
 
     def maybe_land_disarm(self):
@@ -1878,6 +1884,78 @@ class IbvsController:
         return roll_rate, pitch_rate
 
     def control_loop(self, _event):
+        """Timer callback: one control step, guarded.
+
+        An exception escaping a rospy.Timer callback kills that timer's
+        thread for good (the node itself keeps running, so nothing looks
+        dead). So every error is caught here, logged WITH its traceback to
+        rosout, and replaced by a safe setpoint for this tick; the next tick
+        tries the normal step again.
+        """
+        try:
+            self.control_step()
+            if self.loop_errors:
+                rospy.logwarn("ibvs_controller: control loop recovered after "
+                              "%d failed ticks", self.loop_errors)
+            self.loop_errors = 0
+        except Exception:
+            self.loop_errors += 1
+            rospy.logerr_throttle(
+                1.0, "ibvs_controller: CONTROL LOOP ERROR (%d tick(s) in a row) "
+                     "-- sending SAFE setpoint (level, hover throttle). PILOT "
+                     "TAKE OVER.\n%s" % (self.loop_errors, traceback.format_exc()))
+            self.publish_safe_setpoint()
+        self.last_loop_time = rospy.Time.now()
+
+    def watchdog(self, _event):
+        """Separate timer: if the control loop has not completed a tick for
+        watchdog_timeout_s (it HANGS), send the safe setpoint from here."""
+        try:
+            stalled = (rospy.Time.now() - self.last_loop_time).to_sec()
+            if stalled > self.watchdog_timeout_s:
+                rospy.logerr_throttle(
+                    1.0, "ibvs_controller: CONTROL LOOP STALLED for %.2f s -- "
+                         "sending SAFE setpoint. PILOT TAKE OVER." % stalled)
+                self.publish_safe_setpoint()
+        except Exception:
+            rospy.logerr_throttle(1.0, "ibvs_controller: watchdog error:\n%s"
+                                  % traceback.format_exc())
+
+    def publish_safe_setpoint(self):
+        """Level attitude + hover throttle (raw: configured + learned trim;
+        climb rate: hover_thrust = zero climb rate). Never raises. Respects
+        the raw-mode GUID_OPTIONS interlock like the normal path."""
+        try:
+            if self.raw_mode and not self.raw_thrust_ok():
+                return
+            if self.raw_mode:
+                try:
+                    thrust = self.hover_throttle_est()
+                except Exception:
+                    thrust = self.raw_hover_throttle
+            else:
+                thrust = self.hover_thrust
+            msg = AttitudeTarget()
+            msg.header.stamp = rospy.Time.now()
+            yaw = 0.0
+            if self.last_imu is not None:
+                q = self.last_imu.orientation
+                yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
+            if self.yaw_setpoint is not None:
+                yaw = self.yaw_setpoint
+            q = tft.quaternion_from_euler(0.0, 0.0, yaw)
+            msg.type_mask = (AttitudeTarget.IGNORE_ROLL_RATE |
+                             AttitudeTarget.IGNORE_PITCH_RATE |
+                             AttitudeTarget.IGNORE_YAW_RATE)
+            msg.orientation.x, msg.orientation.y = q[0], q[1]
+            msg.orientation.z, msg.orientation.w = q[2], q[3]
+            msg.thrust = thrust
+            self.setpoint_pub.publish(msg)
+        except Exception:
+            rospy.logerr_throttle(1.0, "ibvs_controller: could not send the "
+                                  "safe setpoint:\n%s" % traceback.format_exc())
+
+    def control_step(self):
         self.update_state_machine()
         self.update_approach()
         thrust = self.compute_thrust()

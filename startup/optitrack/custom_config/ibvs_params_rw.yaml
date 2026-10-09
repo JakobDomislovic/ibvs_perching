@@ -321,17 +321,19 @@ hover_ramp_speed: 0.3         # [m/s] the setpoint starts at the height you
 # Hover at hover_height; once ALIGNED for approach_dwell_s without a break,
 # the height setpoint climbs at approach_speed -- ONLY while ALIGNED: it holds
 # as soon as alignment or the target is lost and resumes when ALIGNED again --
-# and never above approach_max_height. The PILOT ends it (leave GUIDED_NOGPS);
-# the next engagement starts over. Status: rostopic echo ibvs/approach
-# (IDLE / WAITING / CLIMBING / PAUSED / CEILING).
+# until STRIKE or contact (below), never above max_height. The PILOT ends it
+# (leave GUIDED_NOGPS); the next engagement starts over. Status: rostopic echo
+# ibvs/approach (IDLE / WAITING / CLIMBING / PAUSED / STRIKE / PUSH / PERCHED /
+# FAILED).
 # NOTE for the floor branch: it was not detected below ~1.2 m
 # (2026-10-08-09-32-35.bag: 0 % at 0.8-1.2 m, 98 % at 1.4-1.6 m).
 approach_enabled: true
 approach_dwell_s: 5.0         # [s] continuously ALIGNED before the climb starts
 approach_speed: 0.05          # [m/s] climb rate of the setpoint (5 cm/s; the
                               # X-Y loop needs 5-9 s to settle, so keep it slow)
-approach_max_height: 2.0      # [m] ceiling -- the setpoint stops and holds here.
-                              # OptiTrack loses the vehicle above ~2.5 m.
+max_height: 2.5               # [m] SAFETY limit for the whole approach: CLIMBING
+                              # and STRIKE never set the height above it (ArUco
+                              # at ~2.3 m; OptiTrack loses the vehicle >~2.5 m)
 
 # --- STRIKE / PUSH / PERCHED (end of the approach) ---------------------------
 #   CLIMBING --(close + aligned within strike_align_px)--> STRIKE: X-Y level,
@@ -343,19 +345,19 @@ approach_max_height: 2.0      # [m] ceiling -- the setpoint stops and holds here
 #   ttc     image only, works OUTDOORS too: distance = climb speed x
 #           time-to-contact, the latter from how fast the target grows in the
 #           image. Needs the detector to send 'size' (px) -- until then it
-#           never strikes and simply climbs to approach_max_height.
+#           never strikes and climbs on until contact (or max_height).
 #   height  LAB ONLY fallback: OptiTrack height >= strike_height
 #   off     never strike (contact during the climb still -> PUSH)
 strike_trigger: ttc           # ttc | height | 'off' (quote it: bare off = false)
-strike_distance: 0.40         # [m] ttc: strike when the estimate is below this.
-                              # Keep it so STRIKE starts BELOW approach_max_height
-                              # (ArUco at 2.3 m -> strike at ~1.85 m, ceiling 2.0)
-strike_height: 1.9            # [m] height trigger only (<= approach_max_height)
+strike_distance: 0.60         # [m] ttc: strike when the estimated camera-to-target
+                              # distance is below this. 2026-10-09-11-34-29.bag:
+                              # camera-to-ArUco ~ 2.51 m - height -> STRIKE at ~1.9 m
+strike_height: 1.9            # [m] height trigger only (below max_height)
 strike_align_px: 50           # [px] must be this well aligned to commit
 strike_confirm_s: 0.2         # [s] close + aligned for this long before STRIKE
 strike_speed: 0.15            # [m/s] START LOW, raise step by step (0.2, 0.3...)
-strike_max_height: 2.3        # [m] setpoint never above (lab: ArUco at ~2.3 m)
-strike_timeout_s: 4.0         # [s] no contact by then -> FAILED, hold height
+strike_timeout_s: 6.0         # [s] no contact by then -> FAILED, back down
+                              # (0.6 m at 0.15 m/s = 4 s, plus margin)
 ttc_window_s: 1.0             # [s] size samples used for the expansion rate
 ttc_min_samples: 10
 vehicle_mass: 1.0             # [kg] for the contact force estimate
