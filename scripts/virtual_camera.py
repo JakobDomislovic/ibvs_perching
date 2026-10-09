@@ -311,6 +311,7 @@ class VirtualCamera:
         vm.header.stamp = stamp
         vm.header.frame_id = 'virtual_camera'
         vm.point.x, vm.point.y = out
+        vm.point.z = msg.point.z      # apparent size [px], passed through
         self.point_pub.publish(vm)
 
         roll, pitch = roll_pitch(tilt_only(R_WB))

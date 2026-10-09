@@ -63,7 +63,7 @@ mission_mode: hover
 #         level in y -- so image-left = drone-right. y is unchanged from LAND.
 #
 # Check any change with:  ./sim_tilt.py --sweep
-image_x_sign: 1.0             # LAND (down cam). PERCH (up cam) would be -1.0
+image_x_sign: -1.0             # LAND (down cam). PERCH (up cam) would be -1.0
 image_y_sign: 1.0             # LAND (down cam). Same value in PERCH
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 
-hover_height: 1.3             # [m] mission_mode 'hover' ONLY: the fixed height
+hover_height: 1.0             # [m] mission_mode 'hover' ONLY: the fixed height
                               # target held via pid_z below. Set equal to
                               # takeoff_height for a clean test, otherwise
                               # CLIMB over/undershoots this and pid_z has an
@@ -332,6 +332,43 @@ approach_speed: 0.05          # [m/s] climb rate of the setpoint (5 cm/s; the
                               # X-Y loop needs 5-9 s to settle, so keep it slow)
 approach_max_height: 2.0      # [m] ceiling -- the setpoint stops and holds here.
                               # OptiTrack loses the vehicle above ~2.5 m.
+
+# --- STRIKE / PUSH / PERCHED (end of the approach) ---------------------------
+#   CLIMBING --(close + aligned within strike_align_px)--> STRIKE: X-Y level,
+#   climb at strike_speed until CONTACT --> PUSH: hover + push_thrust_margin
+#   for push_time_s --> PERCHED if the contact force is still there, else
+#   FAILED (holds height). Contact is watched all the time in CLIMBING and
+#   STRIKE, from IMU + thrust only (topic ibvs/contact, x = force [N]).
+# "Close" (ibvs/closeness): strike_trigger
+#   ttc     image only, works OUTDOORS too: distance = climb speed x
+#           time-to-contact, the latter from how fast the target grows in the
+#           image. Needs the detector to send 'size' (px) -- until then it
+#           never strikes and simply climbs to approach_max_height.
+#   height  LAB ONLY fallback: OptiTrack height >= strike_height
+#   off     never strike (contact during the climb still -> PUSH)
+strike_trigger: ttc           # ttc | height | 'off' (quote it: bare off = false)
+strike_distance: 0.40         # [m] ttc: strike when the estimate is below this.
+                              # Keep it so STRIKE starts BELOW approach_max_height
+                              # (ArUco at 2.3 m -> strike at ~1.85 m, ceiling 2.0)
+strike_height: 1.9            # [m] height trigger only (<= approach_max_height)
+strike_align_px: 50           # [px] must be this well aligned to commit
+strike_confirm_s: 0.2         # [s] close + aligned for this long before STRIKE
+strike_speed: 0.15            # [m/s] START LOW, raise step by step (0.2, 0.3...)
+strike_max_height: 2.3        # [m] setpoint never above (lab: ArUco at ~2.3 m)
+strike_timeout_s: 4.0         # [s] no contact by then -> FAILED, hold height
+ttc_window_s: 1.0             # [s] size samples used for the expansion rate
+ttc_min_samples: 10
+vehicle_mass: 1.0             # [kg] for the contact force estimate
+contact_force_n: 0.6          # [N] sustained push: 0.2 s mean above this...
+contact_dwell_s: 0.2          # [s] ...for this long (free flight: <= 0.38 N)
+impact_force_n: 2.0           # [N] impact: one raw IMU sample above this
+                              # (free flight raw: <= 0.6 N)
+push_thrust_margin: 0.03      # [throttle] above hover while pushing; with hover
+                              # ~0.16 that is ~1.8 N for 1 kg. RAISE to what the
+                              # gripper needs (max 0.10 = ~6 N)
+push_time_s: 1.0              # [s]
+perched_confirm_ratio: 0.5    # PERCHED if >= this x expected push force remains
+perched_thrust_margin: 0.01   # [throttle] light press while PERCHED (pilot takes over)
 pid_z_raw:
   kp: 0.035                   # [throttle/m]  0.5 m low -> +0.018 throttle
   ki: 0.01                    # [throttle/(m*s)] trims a wrong hover throttle
@@ -355,7 +392,7 @@ pid_z_raw:
 # COMPENSATE=true there.
 # ---------------------------------------------------------------------------
 camera:
-  mount: auto                 # auto = from mission_mode (perch -> up, else
+  mount: up                   # camera LOOKS UP (branch above). auto = from mission_mode (perch -> up, else
                               # down) | down | up | custom (+ R_BC: 9 numbers,
                               # row-major, body <- camera)
   # INTRINSICS AT image_width x image_height (1280x720, the resolution the

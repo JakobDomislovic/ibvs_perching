@@ -8,14 +8,17 @@ VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
              positive RIGHT, measured from the image origin (top-left)
     point.y  vertical PIXEL POSITION of the detection in the image,
              positive DOWN, measured from the image origin (top-left)
-    point.z  unused, always 0.0 (there is no range sensor)
+    point.z  apparent SIZE of the target in pixels if the packet has 'size'
+             (e.g. ArUco side length, branch width), else 0.0. Only used for
+             the controller's time-to-contact; no real size is needed.
     header.stamp  the time the FRAME was taken, when the packet says how old
              the frame was (optional field 'age', seconds, measured on the
              detector's own clock: send time - frame time); otherwise the
              arrival time. virtual_camera.py needs the frame time to use the
              attitude the camera actually had; the controller ignores it.
 
-    Packet (JSON): {"px": ..., "py": ..., "age": ...}   ('age' optional)
+    Packet (JSON): {"px": ..., "py": ..., "age": ..., "size": ...}
+                   ('age' and 'size' optional)
 
 This node publishes the detected POINT, not an error: it forwards what the
 detector saw and does no geometry at all. The controller owns the setpoint
@@ -65,8 +68,9 @@ class UdpTargetReceiver:
                       "(publishing raw detected PIXEL POSITION)", ip, port)
 
     def parse(self, data):
-        """JSON datagram -> (px, py, age): the detection's WHOLE-pixel
-        position, and the frame's age in seconds (None if not sent).
+        """JSON datagram -> (px, py, age, size): the detection's WHOLE-pixel
+        position, the frame's age in seconds (None if not sent) and the
+        target's apparent size in pixels (0.0 if not sent).
 
         Accepts px/py (pixel position in the image) or error_x/error_y
         (already centre-relative); both are forwarded unchanged, the
@@ -94,16 +98,21 @@ class UdpTargetReceiver:
                     5.0, "udp_target_receiver: implausible frame age %.3f s "
                          "-- stamping with the arrival time" % age)
                 age = None
-        return int(round(px)), int(round(py)), age
+        size = 0.0
+        if 'size' in d:
+            size = float(d['size'])
+            if not size >= 0.0:      # also rejects NaN
+                size = 0.0
+        return int(round(px)), int(round(py)), age, size
 
-    def publish(self, px, py, stamp):
+    def publish(self, px, py, stamp, size=0.0):
         """Publish the detected pixel position -- no geometry applied."""
         msg = PointStamped()
         msg.header.stamp = stamp
         msg.header.frame_id = self.frame_id
         msg.point.x = float(px)
         msg.point.y = float(py)
-        msg.point.z = 0.0
+        msg.point.z = float(size)
         self.point_pub.publish(msg)
 
     def spin(self):
@@ -118,14 +127,14 @@ class UdpTargetReceiver:
                 continue
 
             try:
-                px, py, age = self.parse(data)
+                px, py, age, size = self.parse(data)
             except (ValueError, KeyError, TypeError) as exc:
                 rospy.logwarn_throttle(5.0, "udp_target_receiver: bad packet: %s" % exc)
                 continue
 
             # frame time = arrival - age (the LAN hop itself is < 1 ms)
             stamp = arrival - rospy.Duration(age) if age else arrival
-            self.publish(px, py, stamp)
+            self.publish(px, py, stamp, size)
 
     def shutdown(self):
         self.sock.close()

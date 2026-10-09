@@ -16,9 +16,10 @@ VISION MODULE INTERFACE (topic `ibvs/target_point`, geometry_msgs/PointStamped):
                  positive RIGHT, from the image origin (top-left)
         point.y  vertical PIXEL POSITION of the detection in the image,
                  positive DOWN, from the image origin (top-left)
-        point.z  IGNORED -- there is no range sensor. The vertical axis is
-                 open-rate (descend for landing, climb for perching), not
-                 target-relative.
+        point.z  apparent SIZE of the target in pixels (optional, 0 = not
+                 sent). Used ONLY by the approach test's time-to-contact
+                 estimate (how fast the target grows in the image); no real
+                 size or distance is ever needed.
     The vision module publishes the POINT it sees and applies no geometry.
     The controller normalizes it against ~image_width / ~image_height, each
     axis by its OWN half-dimension, so the error is +-1.0 at that axis'
@@ -153,6 +154,15 @@ State machine (this is what makes the controller "modal"):
     (ALIGN/ALIGNED) --(no tag for tag_timeout)--> TAG_LOST
     TAG_LOST --(tag seen again)--> ALIGN
 
+  Approach test (~approach_enabled, thrust_mode 'raw'), see update_approach:
+    ALIGNED --(approach_dwell_s, at hover_height)--> CLIMBING
+    CLIMBING --(not aligned / no tag)--> ALIGN / TAG_LOST   (climb paused,
+              back to CLIMBING as soon as ALIGNED again)
+    CLIMBING --(close: time-to-contact, and aligned tightly)--> STRIKE
+    CLIMBING / STRIKE --(contact: IMU + thrust)--> PUSH
+    PUSH --(push_time_s, contact force still there)--> PERCHED
+    PUSH (no force left) / STRIKE (timeout) --> ALIGN, approach FAILED (hold)
+
 TAG_IN_SIGHT behaves exactly like HOVER; it is a status distinction for the
 operator: the detector currently sees the tag, so `ibvs/start` will engage
 immediately. Call ibvs/start when `ibvs/state` shows TAG_IN_SIGHT.
@@ -227,6 +237,7 @@ ALIGNED at hover_height the height setpoint climbs slowly, only while ALIGNED
 (see APP_* below and approach_goal).
 """
 
+import collections
 import math
 
 import rospy
@@ -247,6 +258,18 @@ TAG_IN_SIGHT = 'TAG_IN_SIGHT'
 ALIGN = 'ALIGN'
 ALIGNED = 'ALIGNED'
 TAG_LOST = 'TAG_LOST'
+# Approach test states (thrust_mode 'raw', ~approach_enabled):
+#   CLIMBING  aligned and going up (X-Y servo keeps aligning)
+#   STRIKE    committed final climb: X-Y level, faster climb until contact
+#   PUSH      contact detected: thrust above hover to load the gripper
+#   PERCHED   contact force still there after the push
+CLIMBING = 'CLIMBING'
+STRIKE = 'STRIKE'
+PUSH = 'PUSH'
+PERCHED = 'PERCHED'
+# states in which the latched heading is held (yaw_setpoint kept)
+YAW_HOLD_STATES = (ALIGN, ALIGNED, CLIMBING, STRIKE, PUSH, PERCHED)
+GRAVITY = 9.81
 
 # Mission mode -- what the vertical (thrust/climb-rate) axis does. LAND and
 # PERCH center the target in the image the same way (X-Y IBVS cascade) and
@@ -307,12 +330,30 @@ GUID_OPTIONS_FOR = {THRUST_CLIMB_RATE: 0, THRUST_RAW: 8}
 #   PAUSED    not ALIGNED (or target lost) -> holding the current height;
 #             back to CLIMBING as soon as it is ALIGNED again
 #   CEILING   reached approach_max_height -> holding there
+#   STRIKE / PUSH / PERCHED   mirror the states of the same name
+#   FAILED    strike timed out or the push found no contact force -> holding
+#             height and aligning; no more climbing until re-engaged
 APP_OFF = 'OFF'
 APP_IDLE = 'IDLE'
 APP_WAITING = 'WAITING'
 APP_CLIMBING = 'CLIMBING'
 APP_PAUSED = 'PAUSED'
 APP_CEILING = 'CEILING'
+APP_STRIKE = 'STRIKE'
+APP_PUSH = 'PUSH'
+APP_PERCHED = 'PERCHED'
+APP_FAILED = 'FAILED'
+
+# What starts STRIKE (~strike_trigger):
+#   STRIKE_TTC     image only, works outdoors: distance = climb speed x
+#                  time-to-contact, the latter from how fast the target's
+#                  apparent size (point.z) grows. Needs the detector to send
+#                  'size'; without it STRIKE simply never starts.
+#   STRIKE_HEIGHT  LAB ONLY: odometry (OptiTrack) height >= strike_height
+#   STRIKE_OFF     never strike (contact detection still runs while climbing)
+STRIKE_TTC = 'ttc'
+STRIKE_HEIGHT = 'height'
+STRIKE_OFF = 'off'
 
 
 def clamp(value, low, high):
@@ -512,8 +553,80 @@ class IbvsController:
                 raise rospy.ROSInitException(
                     "ibvs_controller: approach_speed must be > 0 and "
                     "approach_dwell_s >= 0")
+        # --- STRIKE: the committed final climb ---------------------------
+        self.strike_trigger = rospy.get_param('~strike_trigger', STRIKE_TTC)
+        if self.strike_trigger is False:     # YAML 1.1 reads a bare `off` as false
+            self.strike_trigger = STRIKE_OFF
+        self.strike_distance = rospy.get_param('~strike_distance', 0.30)
+        self.strike_height = rospy.get_param('~strike_height', 1.9)
+        self.strike_align_px = rospy.get_param('~strike_align_px', 50.0)
+        self.strike_confirm_s = rospy.get_param('~strike_confirm_s', 0.2)
+        self.strike_speed = rospy.get_param('~strike_speed', 0.15)
+        self.strike_max_height = rospy.get_param('~strike_max_height', 2.3)
+        self.strike_timeout_s = rospy.get_param('~strike_timeout_s', 4.0)
+        # time-to-contact from the target's apparent size (point.z, px)
+        self.ttc_window_s = rospy.get_param('~ttc_window_s', 1.0)
+        self.ttc_min_samples = rospy.get_param('~ttc_min_samples', 10)
+        # --- contact (IMU + thrust), PUSH, PERCHED -------------------------
+        # contact force [N] = mass * (g * applied_throttle / hover_throttle
+        #                             - measured upward specific force)
+        # i.e. what the thrust should accelerate us by, minus what the IMU
+        # feels: a branch pressing down shows up as a positive force. Free
+        # flight stayed within +-0.6 N (std 0.1 N) in 2026-10-08 bags.
+        self.vehicle_mass = rospy.get_param('~vehicle_mass', 1.0)
+        # two contact signals: a sustained push (filtered force over
+        # contact_force_n for contact_dwell_s) and an IMPACT (one raw IMU
+        # sample over impact_force_n). Free flight: filtered (0.2 s) never
+        # above 0.38 N, raw never above 0.6 N.
+        self.contact_force_n = rospy.get_param('~contact_force_n', 0.6)
+        self.contact_dwell_s = rospy.get_param('~contact_dwell_s', 0.2)
+        self.contact_filter_s = rospy.get_param('~contact_filter_s', 0.2)
+        self.impact_force_n = rospy.get_param('~impact_force_n', 2.0)
+        self.contact_baseline_s = rospy.get_param('~contact_baseline_s', 3.0)
+        self.motor_lag_s = rospy.get_param('~motor_lag_s', 0.1)
+        self.push_thrust_margin = rospy.get_param('~push_thrust_margin', 0.03)
+        self.push_time_s = rospy.get_param('~push_time_s', 1.0)
+        self.perched_confirm_ratio = rospy.get_param('~perched_confirm_ratio', 0.5)
+        self.perched_thrust_margin = rospy.get_param('~perched_thrust_margin', 0.01)
+        if self.approach_enabled:
+            if self.strike_trigger not in (STRIKE_TTC, STRIKE_HEIGHT, STRIKE_OFF):
+                raise rospy.ROSInitException(
+                    "ibvs_controller: strike_trigger must be ttc, height or off")
+            if self.strike_max_height <= self.approach_max_height:
+                raise rospy.ROSInitException(
+                    "ibvs_controller: strike_max_height (%.2f m) must be above "
+                    "approach_max_height (%.2f m)" % (self.strike_max_height,
+                                                      self.approach_max_height))
+            if (self.strike_trigger == STRIKE_HEIGHT and
+                    not self.hover_height < self.strike_height <= self.approach_max_height):
+                raise rospy.ROSInitException(
+                    "ibvs_controller: strike_height must be above hover_height "
+                    "and not above approach_max_height")
+            if not 0.0 < self.strike_speed <= 1.0:
+                raise rospy.ROSInitException(
+                    "ibvs_controller: strike_speed must be in (0, 1] m/s")
+            if not (0.0 <= self.push_thrust_margin <= 0.10 and
+                    0.0 <= self.perched_thrust_margin <= self.push_thrust_margin):
+                raise rospy.ROSInitException(
+                    "ibvs_controller: need 0 <= perched_thrust_margin <= "
+                    "push_thrust_margin <= 0.10")
         self.approach = APP_IDLE if self.approach_enabled else APP_OFF
         self.approach_aligned_since = None
+        self.climb_steady_since = None   # climbing at approach_speed since
+        self.strike_ok_since = None
+        self.strike_started = None
+        self.strike_start_height = None
+        self.fail_height = None
+        self.push_started = None
+        self.size_hist = collections.deque(maxlen=200)   # (t, size px)
+        self.contact_hist = collections.deque(maxlen=200)  # (t, force N)
+        self.contact_f_filt = None
+        self.contact_baseline = None
+        self.contact_since = None
+        self.contact_force = 0.0
+        self.contact_reason = ''
+        self.impact_peak = float('-inf')   # max raw force since the last tick
+        self.thrust_applied = self.raw_hover_throttle  # commanded, motor-lagged
         # descend/climb only while laterally centered on the tag, in PIXELS:
         # moving vertically off-center shrinks the camera FOV faster than the
         # X-Y loop converges and the tag falls out of frame (flight-tested).
@@ -769,6 +882,15 @@ class IbvsController:
         # topic silent until the first state change
         self.state_pub.publish(String(data=self.state))
         self.approach_pub.publish(String(data=self.approach))
+        # approach debug: x = contact force estimate (filtered) [N], y = raw
+        # impact peak since the last tick [N], z = applied (lagged) throttle
+        self.contact_pub = rospy.Publisher(
+            'ibvs/contact', PointStamped, queue_size=1)
+        # x = target apparent size [px], y = time-to-contact [s] (NaN if the
+        # target is not growing), z = distance estimate [m] (NaN unless
+        # climbing steadily: approach_speed x time-to-contact)
+        self.closeness_pub = rospy.Publisher(
+            'ibvs/closeness', PointStamped, queue_size=1)
 
         rospy.Subscriber('mavros/state', State, self.mavros_state_callback, queue_size=1)
         rospy.Subscriber('ibvs/target_point', PointStamped, self.target_callback, queue_size=1)
@@ -973,6 +1095,9 @@ class IbvsController:
         self.t_x = t_x
         self.t_y = t_y
         self.last_tag_time = now
+        # apparent target size [px] for time-to-contact (0 = not sent)
+        if msg.point.z > 0.0:
+            self.size_hist.append((now, float(msg.point.z)))
 
         # pixel error: detection minus the aim point, in the IMAGE frame
         # (no signs, no normalization) -- positive x = right of centre,
@@ -1034,6 +1159,12 @@ class IbvsController:
 
     def imu_callback(self, msg):
         self.last_imu = msg
+        # impact = raw contact force of THIS sample (a 50 ms hit is 1-3
+        # samples at 50 Hz and would be missed sampling at the control rate)
+        if self.approach_enabled and self.contact_baseline is not None:
+            f = self.contact_force_raw(msg.linear_acceleration.z) - self.contact_baseline
+            if f > self.impact_peak:
+                self.impact_peak = f
 
     def current_attitude(self):
         """(roll, pitch, yaw) in body FLU from the FCU's AHRS, or None.
@@ -1054,7 +1185,7 @@ class IbvsController:
             rospy.loginfo("ibvs_controller: %s -> %s", self.state, new_state)
             # entering closed-loop servoing from a non-servoing state:
             # start the PIDs fresh (drops any stale integral)
-            if new_state == ALIGN and self.state not in (ALIGN, ALIGNED):
+            if new_state == ALIGN and self.state not in (ALIGN, ALIGNED, CLIMBING):
                 self.pid_x.reset()
                 self.pid_y.reset()
                 # drop the stale derivative too: the detection gap across a
@@ -1068,7 +1199,7 @@ class IbvsController:
                 if self.yaw_setpoint is not None:
                     rospy.loginfo("ibvs_controller: holding yaw %.1f deg for "
                                   "this approach", math.degrees(self.yaw_setpoint))
-            elif new_state not in (ALIGN, ALIGNED):
+            elif new_state not in YAW_HOLD_STATES:
                 # not servoing: follow the current heading, never command a change
                 self.yaw_setpoint = None
             self.state = new_state
@@ -1143,7 +1274,7 @@ class IbvsController:
                 self.transition(HOVER)
         elif self.state in (HOVER, TAG_IN_SIGHT):
             self.transition(ALIGN if self.tag_is_fresh() else TAG_LOST)
-        elif self.state in (ALIGN, ALIGNED) and not self.tag_is_fresh():
+        elif self.state in (ALIGN, ALIGNED, CLIMBING) and not self.tag_is_fresh():
             self.transition(TAG_LOST)
         elif self.state == TAG_LOST:
             if self.tag_is_fresh():
@@ -1274,6 +1405,13 @@ class IbvsController:
             # same each engagement). Bounded by pid_z_raw/i_max.
             self.z_ref = None
             self.approach_aligned_since = None
+            self.climb_steady_since = None
+            self.strike_ok_since = None
+            self.strike_start_height = None
+            self.fail_height = None
+            self.contact_f_filt = None
+            self.contact_baseline = None
+            self.contact_since = None
             if self.approach_enabled:
                 self.set_approach(APP_IDLE, "not engaged")
             return self.raw_hover_throttle
@@ -1281,6 +1419,15 @@ class IbvsController:
         odom = self.last_odom
         age = (None if odom is None else
                (rospy.Time.now() - self.last_odom_time).to_sec())
+        if self.state in (PUSH, PERCHED):
+            # Direct throttle, no height loop: we are pressed against the
+            # branch. Keep z_ref at the current height so a FAILED push holds
+            # where it is instead of dropping back to an old setpoint.
+            if odom is not None and age <= self.raw_odom_timeout:
+                self.z_ref = odom.pose.pose.position.z
+            margin = (self.push_thrust_margin if self.state == PUSH
+                      else self.perched_thrust_margin)
+            return self.hover_throttle_est() + margin
         if odom is None or age > self.raw_odom_timeout:
             rospy.logerr_throttle(
                 1.0, "ibvs_controller: RAW thrust with no fresh OptiTrack "
@@ -1325,55 +1472,277 @@ class IbvsController:
     def approach_goal(self):
         """(goal height, ramp speed) for the height setpoint this tick.
 
-        Without ~approach_enabled: hover_height at hover_ramp_speed, i.e. the
-        plain height hold. With it, the APPROACH TEST (see APP_* at the top):
-          WAITING   hover_height at hover_ramp_speed; once z_ref has arrived
-                    and the state has been ALIGNED for approach_dwell_s
-                    without a break -> CLIMBING
-          CLIMBING  goal approach_max_height at approach_speed; leaving
-                    ALIGNED -> PAUSED, reaching the goal -> CEILING
-          PAUSED    goal = current z_ref (hold); ALIGNED again -> CLIMBING
-          CEILING   hold approach_max_height
-        The state used is the previous tick's: ALIGN/ALIGNED are decided in
-        compute_desired_tilt, which runs after this. One tick (33 ms) late is
-        irrelevant at approach speeds of cm/s.
+        Pure: the approach status is decided in update_approach(), which runs
+        earlier in the same control tick.
+          plain hold / WAITING   hover_height at hover_ramp_speed
+          state CLIMBING         approach_max_height at approach_speed
+          state STRIKE           strike_max_height at strike_speed
+          FAILED                 back to where STRIKE started, hover_ramp_speed
+          anything else          hold z_ref (PAUSED, CEILING)
+        """
+        if not self.approach_enabled or self.approach == APP_WAITING:
+            return self.hover_height, self.hover_ramp_speed
+        if self.state == STRIKE:
+            return self.strike_max_height, self.strike_speed
+        if self.state == CLIMBING and self.approach in (APP_CLIMBING, APP_CEILING):
+            return self.approach_max_height, self.approach_speed
+        if self.approach == APP_FAILED and self.fail_height is not None:
+            return self.fail_height, self.hover_ramp_speed
+        return self.z_ref, self.approach_speed
+
+    def update_approach(self):
+        """APPROACH TEST logic, once per control tick, before the thrust.
+
+        Drives the states CLIMBING / STRIKE / PUSH / PERCHED (see the module
+        docstring) and the detailed status on ibvs/approach. The contact
+        estimate (update_contact, IMU + thrust) runs every tick and ends
+        CLIMBING or STRIKE the moment the vehicle hits something.
         """
         if not self.approach_enabled:
-            return self.hover_height, self.hover_ramp_speed
+            return
         now = rospy.Time.now()
-        aligned = self.state == ALIGNED
+        # always, also while not engaged: lets the time-to-contact be checked
+        # by hand (props off) before it is ever flown
+        self.publish_closeness(now)
+        if self.state == WAIT_ARM or self.z_ref is None:
+            return
+        contact = self.update_contact(now)
+        st = self.state
+
+        if st in (CLIMBING, STRIKE) and contact:
+            self.transition(PUSH)
+            self.push_started = now
+            self.set_approach(APP_PUSH, "contact (%s) at %.2f m -> +%.3f "
+                              "throttle for %.1f s" % (
+                                  self.contact_reason, self.z_ref,
+                                  self.push_thrust_margin, self.push_time_s))
+            return
+        if st == PUSH:
+            expected = (self.vehicle_mass * GRAVITY * self.push_thrust_margin /
+                        self.hover_throttle_est())
+            t_push = (now - self.push_started).to_sec()
+            # Lost the branch mid-push (bounced off / it gave way): the extra
+            # thrust is now accelerating us upward -- stop at once instead of
+            # pushing into free air for the rest of push_time_s.
+            if (t_push >= 0.25 and
+                    self.mean_contact_force(now, 0.15) < 0.3 * expected):
+                self.fail_approach("contact lost %.2f s into the push" % t_push)
+                return
+            if t_push >= self.push_time_s:
+                held = self.mean_contact_force(now, 0.3)
+                if held >= self.perched_confirm_ratio * expected:
+                    self.transition(PERCHED)
+                    self.set_approach(APP_PERCHED, "%.1f N still pressing after "
+                                      "the push (expected %.1f N)" % (held, expected))
+                else:
+                    self.fail_approach("only %.1f N after the push (expected "
+                                       "%.1f N) -- not perched" % (held, expected))
+            return
+        if st == PERCHED:
+            return
+        if st == STRIKE:
+            if (now - self.strike_started).to_sec() >= self.strike_timeout_s:
+                self.fail_approach("no contact within %.1f s of STRIKE" %
+                                   self.strike_timeout_s)
+            return
 
         if self.approach == APP_WAITING:
             at_hover = abs(self.z_ref - self.hover_height) < 1e-6
-            if aligned and at_hover:
+            if st == ALIGNED and at_hover:
                 if self.approach_aligned_since is None:
                     self.approach_aligned_since = now
                 elif ((now - self.approach_aligned_since).to_sec() >=
                       self.approach_dwell_s):
-                    self.set_approach(
-                        APP_CLIMBING, "ALIGNED %.1f s at %.2f m -> climbing at "
-                        "%.2f m/s, max %.2f m" % (
-                            self.approach_dwell_s, self.z_ref,
-                            self.approach_speed, self.approach_max_height))
+                    self.start_climbing(now, "ALIGNED %.1f s at %.2f m -> "
+                                        "climbing at %.2f m/s, max %.2f m" % (
+                                            self.approach_dwell_s, self.z_ref,
+                                            self.approach_speed,
+                                            self.approach_max_height))
             else:
                 self.approach_aligned_since = None
-            if self.approach == APP_WAITING:
-                return self.hover_height, self.hover_ramp_speed
-
-        if self.approach == APP_CLIMBING:
-            if self.z_ref >= self.approach_max_height - 1e-6:
+        elif self.approach == APP_PAUSED:
+            if st == ALIGNED:
+                self.start_climbing(now, "ALIGNED again at %.2f m" % self.z_ref)
+        elif self.approach in (APP_CLIMBING, APP_CEILING):
+            if st != CLIMBING:
+                self.set_approach(APP_PAUSED, "%s -- holding %.2f m" %
+                                  (st, self.z_ref))
+                self.climb_steady_since = None
+                self.strike_ok_since = None
+                return
+            if (self.approach == APP_CLIMBING and
+                    self.z_ref >= self.approach_max_height - 1e-6):
                 self.set_approach(APP_CEILING, "reached %.2f m -- holding" %
                                   self.z_ref)
-            elif not aligned:
-                self.set_approach(APP_PAUSED, "%s -- holding %.2f m" %
-                                  (self.state, self.z_ref))
-        elif self.approach == APP_PAUSED and aligned:
-            self.set_approach(APP_CLIMBING, "ALIGNED again at %.2f m" %
-                              self.z_ref)
+                self.climb_steady_since = None
+            why = self.strike_ready(now)
+            if why:
+                self.transition(STRIKE)
+                self.strike_started = now
+                self.strike_start_height = self.z_ref
+                self.set_approach(APP_STRIKE, "%s -> striking at %.2f m/s, "
+                                  "max %.2f m" % (why, self.strike_speed,
+                                                  self.strike_max_height))
 
-        if self.approach in (APP_CLIMBING, APP_CEILING):
-            return self.approach_max_height, self.approach_speed
-        return self.z_ref, self.approach_speed        # PAUSED: hold
+    def start_climbing(self, now, why):
+        self.transition(CLIMBING)
+        self.climb_steady_since = now
+        self.strike_ok_since = None
+        self.set_approach(APP_CLIMBING, why)
+
+    def fail_approach(self, why):
+        """Give up this approach: back DOWN to where STRIKE started (away
+        from the branch; current height if it never struck), align again,
+        and no more climbing until the next engagement."""
+        if self.last_odom is not None:
+            self.z_ref = self.last_odom.pose.pose.position.z
+        self.fail_height = (self.strike_start_height
+                            if self.strike_start_height is not None else self.z_ref)
+        self.set_approach(APP_FAILED, "%s -- going back to %.2f m" %
+                          (why, self.fail_height))
+        self.transition(ALIGN)
+
+    def strike_ready(self, now):
+        """Reason (str) once STRIKE should start, else None.
+
+        Needs: tag fresh and aligned within strike_align_px, AND "close" --
+        ttc: estimated distance < strike_distance (image + climb speed only,
+        works outdoors); height: odometry height >= strike_height (lab).
+        Both must hold for strike_confirm_s without a break.
+        """
+        err = self.lateral_error_px()
+        close, label = False, ''
+        if (self.strike_trigger != STRIKE_OFF and err is not None and
+                err <= self.strike_align_px and self.tag_is_fresh()):
+            if self.strike_trigger == STRIKE_HEIGHT:
+                if self.last_odom is not None:
+                    z = self.last_odom.pose.pose.position.z
+                    close, label = z >= self.strike_height, "height %.2f m" % z
+            else:
+                d = self.distance_estimate(now)
+                if d is not None:
+                    close, label = d < self.strike_distance, "%.2f m to go" % d
+        if not close:
+            self.strike_ok_since = None
+            return None
+        if self.strike_ok_since is None:
+            self.strike_ok_since = now
+            return None
+        if (now - self.strike_ok_since).to_sec() < self.strike_confirm_s:
+            return None
+        return "close (%s), aligned %.0f px" % (label, err)
+
+    def expansion_rate(self, now):
+        """d ln(size)/dt [1/s] of the target's apparent size over
+        ttc_window_s (least squares), or None. Time-to-contact = 1/rate."""
+        pts = [((t - now).to_sec(), math.log(sz)) for t, sz in self.size_hist
+               if (now - t).to_sec() <= self.ttc_window_s]
+        if len(pts) < self.ttc_min_samples:
+            return None
+        n = float(len(pts))
+        tm = sum(p[0] for p in pts) / n
+        lm = sum(p[1] for p in pts) / n
+        stt = sum((p[0] - tm) ** 2 for p in pts)
+        if stt <= 1e-9:
+            return None
+        return sum((p[0] - tm) * (p[1] - lm) for p in pts) / stt
+
+    def distance_estimate(self, now):
+        """Distance to the target [m] = climb speed x time-to-contact, or
+        None. Valid only after climbing steadily at approach_speed for at
+        least ttc_window_s, and only while the target is growing.
+
+        The fitted rate describes the MIDDLE of the window (half a window
+        ago), so the distance it gives is v * window / 2 too far; that is
+        subtracted to get the distance NOW (exact for a steady climb)."""
+        if (self.climb_steady_since is None or
+                (now - self.climb_steady_since).to_sec() < self.ttc_window_s):
+            return None
+        rate = self.expansion_rate(now)
+        if rate is None or rate <= 1e-3:
+            return None
+        return (self.approach_speed / rate -
+                self.approach_speed * self.ttc_window_s / 2.0)
+
+    def publish_closeness(self, now):
+        m = PointStamped()
+        m.header.stamp = now
+        m.point.x = self.size_hist[-1][1] if self.size_hist else 0.0
+        rate = self.expansion_rate(now)
+        m.point.y = 1.0 / rate if rate is not None and rate > 1e-3 else float('nan')
+        d = self.distance_estimate(now)
+        m.point.z = d if d is not None else float('nan')
+        self.closeness_pub.publish(m)
+
+    def hover_throttle_est(self):
+        """Throttle that just holds the vehicle: configured + learned trim."""
+        return self.raw_hover_throttle + self.pid_z_raw.ki * self.pid_z_raw.integral
+
+    def contact_force_raw(self, a_z):
+        """mass * (g * applied_throttle / hover_throttle - a_z) [N]."""
+        return self.vehicle_mass * (GRAVITY * self.thrust_applied /
+                                    self.hover_throttle_est() - a_z)
+
+    def update_contact(self, now):
+        """IMU + thrust contact estimate; True once contact is CONFIRMED.
+
+        force = mass * (g * applied_throttle / hover_throttle - a_z), a_z
+        the IMU's upward specific force. In free flight the thrust explains
+        what the IMU feels and this is ~0; a branch pushing down on the
+        vehicle (impact, or pressing against it) makes it positive. The
+        baseline absorbs the IMU scale / hover-trim bias; it is learned only
+        while hovering (ALIGN / ALIGNED / TAG_LOST) and FROZEN while CLIMBING
+        and STRIKE, so a slowly building push cannot be learned away.
+        Contact (checked in CLIMBING and STRIKE):
+          impact     one raw IMU sample > impact_force_n
+          sustained  filtered force > contact_force_n for contact_dwell_s
+        Needs no OptiTrack and no camera.
+        """
+        if self.last_imu is None:
+            return False
+        f = self.contact_force_raw(self.last_imu.linear_acceleration.z)
+        k = min(1.0, self.dt / self.contact_filter_s)
+        self.contact_f_filt = (f if self.contact_f_filt is None else
+                               self.contact_f_filt + k * (f - self.contact_f_filt))
+        if self.contact_baseline is None:
+            self.contact_baseline = self.contact_f_filt
+        force = self.contact_f_filt - self.contact_baseline
+        if (self.state in (ALIGN, ALIGNED, TAG_LOST) and
+                abs(force) < 0.5 * self.contact_force_n):
+            self.contact_baseline += (min(1.0, self.dt / self.contact_baseline_s) *
+                                      (self.contact_f_filt - self.contact_baseline))
+        impact = self.impact_peak
+        self.impact_peak = float('-inf')
+        self.contact_force = force
+        self.contact_hist.append((now, force))
+
+        m = PointStamped()
+        m.header.stamp = now
+        m.point.x = force
+        m.point.y = impact if impact > float('-inf') else float('nan')
+        m.point.z = self.thrust_applied
+        self.contact_pub.publish(m)
+
+        if self.state not in (CLIMBING, STRIKE):
+            self.contact_since = None
+            return False
+        if impact > self.impact_force_n:
+            self.contact_reason = "impact %.1f N" % impact
+            return True
+        if force > self.contact_force_n:
+            if self.contact_since is None:
+                self.contact_since = now
+            elif (now - self.contact_since).to_sec() >= self.contact_dwell_s:
+                self.contact_reason = "pressing %.1f N for %.1f s" % (
+                    force, self.contact_dwell_s)
+                return True
+        else:
+            self.contact_since = None
+        return False
+
+    def mean_contact_force(self, now, window_s):
+        vals = [f for t, f in self.contact_hist if (now - t).to_sec() <= window_s]
+        return sum(vals) / len(vals) if vals else 0.0
 
     def maybe_land_disarm(self):
         """LAND terminal: once centered and low enough, disarm (touchdown).
@@ -1451,7 +1820,9 @@ class IbvsController:
         # on a live detection; every other state wants level.
         desired_roll = 0.0
         desired_pitch = 0.0
-        if self.state in (ALIGN, ALIGNED) and self.t_x is not None:
+        # CLIMBING keeps aligning; STRIKE / PUSH / PERCHED fly level (the
+        # target may blur or leave the image at the very end).
+        if self.state in (ALIGN, ALIGNED, CLIMBING) and self.t_x is not None:
             # Lateral error as a frame-fraction -- this drives the outer law.
             err_x = self.target_x - self.t_x
             err_y = self.target_y - self.t_y
@@ -1508,7 +1879,12 @@ class IbvsController:
 
     def control_loop(self, _event):
         self.update_state_machine()
+        self.update_approach()
         thrust = self.compute_thrust()
+        # what the motors are actually producing (first-order motor lag), for
+        # the IMU + thrust contact estimate
+        self.thrust_applied += ((thrust - self.thrust_applied) *
+                                min(1.0, self.dt / self.motor_lag_s))
         desired_roll, desired_pitch = self.compute_desired_tilt()
         # Raw mode on an FCU not confirmed at GUID_OPTIONS 8: send NOTHING.
         # Any thrust value is wrong for one of the two meanings, whereas no
