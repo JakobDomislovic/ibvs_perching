@@ -613,6 +613,18 @@ class IbvsController:
         self.fail_height = None
         self.push_started = None
         self.size_hist = collections.deque(maxlen=200)   # (t, size px)
+        # commanded X-Y tilt while servoing (control thread only): its mean
+        # over the last trim_window_s before STRIKE is the trim held blind
+        self.tilt_hist = collections.deque(maxlen=200)   # (t, roll, pitch)
+        self.trim_window_s = rospy.get_param('~trim_window_s', 1.0)
+        self.strike_trim = (0.0, 0.0)
+        # STRIKE keeps correcting X-Y as long as the target is still detected
+        # (detection younger than strike_det_timeout_s); only when it is gone
+        # does it fall back to holding the trim. 2026-10-11-17-58-16.bag: the
+        # target was still seen for 1.3 of the 1.9 s blind phase, and the
+        # vehicle drifted ~9 cm holding the trim alone.
+        self.strike_xy_correct = rospy.get_param('~strike_xy_correct', True)
+        self.strike_det_timeout_s = rospy.get_param('~strike_det_timeout_s', 0.2)
         self.contact_hist = collections.deque(maxlen=200)  # (t, force N)
         self.contact_f_filt = None
         self.contact_baseline = None
@@ -1190,7 +1202,11 @@ class IbvsController:
             rospy.loginfo("ibvs_controller: %s -> %s", self.state, new_state)
             # entering closed-loop servoing from a non-servoing state:
             # start the PIDs fresh (drops any stale integral)
-            if new_state == ALIGN and self.state not in (ALIGN, ALIGNED, CLIMBING):
+            # (from STRIKE / PUSH / PERCHED, i.e. a FAILED approach, the
+            # integrator is KEPT: it is the trim the vehicle needs to hold
+            # position, still valid a moment later)
+            if new_state == ALIGN and self.state not in (ALIGN, ALIGNED, CLIMBING,
+                                                         STRIKE, PUSH, PERCHED):
                 self.pid_x.reset()
                 self.pid_y.reset()
                 # drop the stale derivative too: the detection gap across a
@@ -1577,12 +1593,28 @@ class IbvsController:
                 return
             why = self.strike_ready(now)
             if why:
+                self.strike_trim = self.current_trim(now)
                 self.transition(STRIKE)
                 self.strike_started = now
                 self.strike_start_height = self.z_ref
+                why += ", holding trim roll %+.2f pitch %+.2f deg" % (
+                    math.degrees(self.strike_trim[0]),
+                    math.degrees(self.strike_trim[1]))
                 self.set_approach(APP_STRIKE, "%s -> striking at %.2f m/s, "
                                   "max %.2f m" % (why, self.strike_speed,
                                                   self.max_height))
+
+    def current_trim(self, now):
+        """Tilt (roll, pitch) that held the vehicle in place: the mean
+        commanded tilt over the last trim_window_s of servoing (P's steady
+        part included, noise averaged out). Falls back to the integrators."""
+        pts = [(r, p) for t, r, p in list(self.tilt_hist)
+               if (now - t).to_sec() <= self.trim_window_s]
+        if len(pts) >= 5:
+            return (sum(r for r, _ in pts) / len(pts),
+                    sum(p for _, p in pts) / len(pts))
+        return (self.pid_x.ki * self.pid_x.integral,
+                self.pid_y.ki * self.pid_y.integral)
 
     def start_climbing(self, now, why):
         self.transition(CLIMBING)
@@ -1826,8 +1858,26 @@ class IbvsController:
         # on a live detection; every other state wants level.
         desired_roll = 0.0
         desired_pitch = 0.0
-        # CLIMBING keeps aligning; STRIKE / PUSH / PERCHED fly level (the
-        # target may blur or leave the image at the very end).
+        # CLIMBING keeps aligning. STRIKE / PUSH / PERCHED fly blind (the
+        # target blurs or leaves the image at the very end) and HOLD THE TRIM:
+        # the mean tilt commanded over the last second before STRIKE, i.e. the
+        # tilt at which the vehicle stood still (current_trim). Plain level (0 deg) was
+        # flown in 2026-10-09-12-25-52.bag and dropped the 0.3-0.6 deg the
+        # vehicle needs to stand still -> 10-28 cm/s sideways drift, the
+        # branch was missed by 28-65 cm in all three strikes.
+        if (self.state == STRIKE and self.strike_xy_correct and
+                self.t_x is not None and self.last_tag_time is not None and
+                (rospy.Time.now() - self.last_tag_time).to_sec() <=
+                self.strike_det_timeout_s):
+            # target still in sight: keep correcting, but never leave STRIKE
+            # because of the error (no ALIGN/ALIGNED logic here)
+            return (self.pid_x.update(-(self.target_x - self.t_x), self.t_x_dot, self.dt),
+                    self.pid_y.update(-(self.target_y - self.t_y), self.t_y_dot, self.dt))
+        if self.state in (STRIKE, PUSH, PERCHED):
+            self.pid_x.zero_terms()
+            self.pid_y.zero_terms()
+            return (clamp(self.strike_trim[0], -self.max_tilt, self.max_tilt),
+                    clamp(self.strike_trim[1], -self.max_tilt, self.max_tilt))
         if self.state in (ALIGN, ALIGNED, CLIMBING) and self.t_x is not None:
             # Lateral error as a frame-fraction -- this drives the outer law.
             err_x = self.target_x - self.t_x
@@ -1859,6 +1909,7 @@ class IbvsController:
             # d(-err_x)/dt = +t_x_dot; err_y = -t_y, so d(err_y)/dt = -t_y_dot.
             desired_roll = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
             desired_pitch = self.pid_y.update(-err_y, self.t_y_dot, self.dt)
+            self.tilt_hist.append((rospy.Time.now(), desired_roll, desired_pitch))
         else:
             # PIDs not running: clear their debug terms so ibvs/pid_* reads 0
             # instead of holding whatever it last computed while servoing.

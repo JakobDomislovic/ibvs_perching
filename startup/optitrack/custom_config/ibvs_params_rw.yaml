@@ -329,8 +329,8 @@ hover_ramp_speed: 0.3         # [m/s] the setpoint starts at the height you
 # (2026-10-08-09-32-35.bag: 0 % at 0.8-1.2 m, 98 % at 1.4-1.6 m).
 approach_enabled: true
 approach_dwell_s: 5.0         # [s] continuously ALIGNED before the climb starts
-approach_speed: 0.05          # [m/s] climb rate of the setpoint (5 cm/s; the
-                              # X-Y loop needs 5-9 s to settle, so keep it slow)
+approach_speed: 0.10          # [m/s] climb rate while CLIMBING (aligned). Was 0.05
+                              # until 2026-10-11.
 max_height: 2.5               # [m] SAFETY limit for the whole approach: CLIMBING
                               # and STRIKE never set the height above it (ArUco
                               # at ~2.3 m; OptiTrack loses the vehicle >~2.5 m)
@@ -355,7 +355,10 @@ strike_distance: 0.60         # [m] ttc: strike when the estimated camera-to-tar
 strike_height: 1.9            # [m] height trigger only (below max_height)
 strike_align_px: 50           # [px] must be this well aligned to commit
 strike_confirm_s: 0.2         # [s] close + aligned for this long before STRIKE
-strike_speed: 0.15            # [m/s] START LOW, raise step by step (0.2, 0.3...)
+strike_speed: 0.25            # [m/s] blind final climb. Was 0.15 until 2026-10-11:
+                              # 3.5-4 s blind -> 28-65 cm drift. Raise step by step.
+strike_xy_correct: true       # keep correcting X-Y in STRIKE while the target is
+strike_det_timeout_s: 0.2     # still detected (younger than this); then hold trim
 strike_timeout_s: 6.0         # [s] no contact by then -> FAILED, back down
                               # (0.6 m at 0.15 m/s = 4 s, plus margin)
 ttc_window_s: 1.0             # [s] size samples used for the expansion rate
@@ -363,8 +366,10 @@ ttc_min_samples: 10
 vehicle_mass: 1.0             # [kg] for the contact force estimate
 contact_force_n: 0.6          # [N] sustained push: 0.2 s mean above this...
 contact_dwell_s: 0.2          # [s] ...for this long (free flight: <= 0.38 N)
-impact_force_n: 2.0           # [N] impact: one raw IMU sample above this
-                              # (free flight raw: <= 0.6 N)
+impact_force_n: 1.2           # [N] impact: one raw IMU sample above this. Was 2.0
+                              # until 2026-10-11: the real hit (0.25 m/s on the
+                              # ArUco) peaked at exactly 2.0 N. Free flight raw:
+                              # <= 0.16 N (2026-10-11), <= 0.6 N (older bags)
 push_thrust_margin: 0.03      # [throttle] above hover while pushing; with hover
                               # ~0.16 that is ~1.8 N for 1 kg. RAISE to what the
                               # gripper needs (max 0.10 = ~6 N)
