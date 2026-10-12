@@ -533,6 +533,9 @@ class IbvsController:
         #          size gate smaller than that would never let I remove it
         #          (simulated: stuck 0.2 m low with a 0.15 m gate).
         self.hover_ramp_speed = rospy.get_param('~hover_ramp_speed', 0.3)
+        # let pid_z_raw's integral learn during the approach climb (CLIMBING /
+        # STRIKE) too, see compute_raw_height_thrust
+        self.climb_integrate = rospy.get_param('~climb_integrate', False)
         # ramped height setpoint [m]; None = not engaged (re-seeded from the
         # current height on the next engagement)
         self.z_ref = None
@@ -617,6 +620,18 @@ class IbvsController:
         # leaving the other half for model error. Measured > limit -> abort.
         self.max_contact_force_n = rospy.get_param('~max_contact_force_n', FORCE_LIMIT_N)
         self.contact_stiffness = rospy.get_param('~contact_stiffness_n_per_m', 2000.0)
+        # GRIPPER SNAP MONITOR -- OBSERVE ONLY, changes nothing in the flight.
+        # 2026-10-12-17-44-31: 0.9 s into the push the roll rate jumped to
+        # 364 deg/s and the vehicle sat ~4 deg off its commanded attitude for
+        # ~0.5 s -- probably the gripper closing. The impact itself also
+        # spikes (190-230 deg/s) but within the first ~0.1 s of PUSH, hence
+        # snap_ignore_s. Published on ibvs/gripper, logged once per push.
+        self.snap_gyro_dps = rospy.get_param('~snap_gyro_dps', 150.0)
+        self.snap_ignore_s = rospy.get_param('~snap_ignore_s', 0.2)
+        self.gyro_peak = 0.0      # max roll/pitch rate since the last tick [deg/s]
+        self.snap_at = None       # time of the snap candidate in this push
+        self.snap_att_err = 0.0   # max attitude error in the 0.5 s after it
+        self.snap_logged = False
         self.push_force_target = self.activation_margin * self.activation_force_n
         if self.approach_enabled:
             if self.strike_trigger not in (STRIKE_TTC, STRIKE_HEIGHT, STRIKE_OFF):
@@ -844,6 +859,14 @@ class IbvsController:
         self.align_dwell_time = rospy.get_param('~align_dwell_time', 2.0)
         self.align_hysteresis = rospy.get_param('~align_hysteresis', 1.5)
         self.tag_timeout = rospy.get_param('~tag_timeout', 1.0)
+        # IMAGE SETPOINT RAMP: on entering ALIGN the setpoint starts where the
+        # target IS and slides to the aim point at this many px/s, so a large
+        # start error is crossed at a bounded speed instead of at full tilt
+        # (2026-10-12-17-44-31: 395-454 px starts -> 0.4-0.5 m/s, overshoot,
+        # aborted; the 50 px start aligned in 2.2 s). 0 = off (step setpoint).
+        self.align_ref_rate = rospy.get_param('~align_ref_rate_px_s', 0.0)
+        self.ref_x = None     # shaped setpoint, same frame-fraction as t_x
+        self.ref_y = None
 
         # Servoing gate: takeoff only climbs and hovers; flying to the tag
         # starts when the ibvs/start service is called (or ~auto_start: true).
@@ -963,6 +986,11 @@ class IbvsController:
         # impact peak since the last tick [N], z = applied (lagged) throttle
         self.contact_pub = rospy.Publisher(
             'ibvs/contact', PointStamped, queue_size=1)
+        # ibvs/gripper (observe only): x = roll/pitch rate peak since the last
+        # tick [deg/s], y = |IMU tilt - commanded tilt| [deg], z = 1 once a
+        # snap candidate was seen in this PUSH/PERCHED
+        self.gripper_pub = rospy.Publisher(
+            'ibvs/gripper', PointStamped, queue_size=1)
         # x = target apparent size [px], y = time-to-contact [s] (NaN if the
         # target is not growing), z = distance estimate [m] (NaN unless
         # climbing steadily: approach_speed x time-to-contact)
@@ -1247,6 +1275,9 @@ class IbvsController:
 
     def imu_callback(self, msg):
         self.last_imu = msg
+        rate = math.degrees(math.hypot(msg.angular_velocity.x, msg.angular_velocity.y))
+        if rate > self.gyro_peak:
+            self.gyro_peak = rate
         # impact = raw contact force of THIS sample (a 50 ms hit is 1-3
         # samples at 50 Hz and would be missed sampling at the control rate)
         if self.approach_enabled and self.contact_baseline is not None:
@@ -1284,6 +1315,9 @@ class IbvsController:
                 # TAG_LOST would otherwise show up as a huge d(error)/dt
                 self.t_x_dot = 0.0
                 self.t_y_dot = 0.0
+                # the image setpoint ramp starts again from the target itself
+                self.ref_x = None
+                self.ref_y = None
                 # Latch the heading to hold for the whole approach (attitude
                 # mode commands a quaternion, which must carry SOME yaw).
                 att = self.current_attitude()
@@ -1556,8 +1590,16 @@ class IbvsController:
             self.z_ref = goal
 
         error = self.z_ref - height
+        # The integral is frozen while the setpoint ramps (big engagement
+        # ramps wound it up, 2026-09-29) -- except in the approach climb:
+        # there it must learn the out-of-ground-effect trim, or the vehicle
+        # trails the setpoint (2026-10-12-17-44-31, engaged at 0.3 m: 13-20 cm
+        # behind for the whole climb, z_ref hit max_height before contact,
+        # and the P term read as ~0.45 N of fake contact force).
+        integrate = ref_rate == 0.0 or (self.climb_integrate and
+                                        self.state in (CLIMBING, STRIKE))
         delta = self.pid_z_raw.update(error, ref_rate - height_rate, self.dt,
-                                      integrate=(ref_rate == 0.0))
+                                      integrate=integrate)
         return self.raw_hover_throttle + delta
 
     def set_approach(self, new, why=''):
@@ -1625,6 +1667,8 @@ class IbvsController:
             self.push_peak = 0.0
             self.activation_since = None
             self.push_contact_z = self.fresh_odom_height(now)
+            self.snap_at = None
+            self.snap_logged = False
             self.set_approach(APP_PUSH, "contact (%s) at %.2f m -> pushing %.1f N "
                               "(gripper needs %.1f N for %.1f s)" % (
                                   self.contact_reason, self.z_ref,
@@ -1912,6 +1956,39 @@ class IbvsController:
             self.contact_since = None
         return False
 
+    def monitor_gripper(self, desired_roll, desired_pitch):
+        """OBSERVE ONLY: flag a possible gripper snap (see snap_gyro_dps) on
+        ibvs/gripper and in the log. Never changes state or setpoints."""
+        now = rospy.Time.now()
+        peak, self.gyro_peak = self.gyro_peak, 0.0
+        att = self.current_attitude()
+        att_err = (math.degrees(math.hypot(att[0] - desired_roll,
+                                           att[1] - desired_pitch))
+                   if att is not None else float('nan'))
+        if self.state in (PUSH, PERCHED) and self.push_started is not None:
+            t_push = (now - self.push_started).to_sec()
+            if (self.snap_at is None and t_push >= self.snap_ignore_s and
+                    peak >= self.snap_gyro_dps):
+                self.snap_at = now
+                self.snap_att_err = 0.0
+                rospy.loginfo("ibvs_controller: GRIPPER SNAP? roll/pitch rate "
+                              "%.0f deg/s %.2f s after contact (observe only)",
+                              peak, t_push)
+            if self.snap_at is not None and not self.snap_logged:
+                if (now - self.snap_at).to_sec() <= 0.5:
+                    self.snap_att_err = max(self.snap_att_err, att_err)
+                else:
+                    self.snap_logged = True
+                    rospy.loginfo("ibvs_controller: ...after the snap the attitude "
+                                  "was up to %.1f deg off the command for 0.5 s",
+                                  self.snap_att_err)
+        m = PointStamped()
+        m.header.stamp = now
+        m.point.x = peak
+        m.point.y = att_err
+        m.point.z = 1.0 if self.snap_at is not None else 0.0
+        self.gripper_pub.publish(m)
+
     def mean_contact_force(self, now, window_s):
         vals = [f for t, f in list(self.contact_hist)
                 if (now - t).to_sec() <= window_s]
@@ -1971,6 +2048,36 @@ class IbvsController:
             self.arming_srv(False)
         except rospy.ServiceException as exc:
             rospy.logerr("ibvs_controller: disarm failed: %s", exc)
+
+    def ramp_image_setpoint(self):
+        """Image setpoint for the X-Y PIDs: (ref_x, ref_y, d ref_x/dt,
+        d ref_y/dt), in the same frame-fraction as t_x / t_y.
+
+        align_ref_rate_px_s 0: the aim point itself (a step, as before).
+        Otherwise the setpoint starts where the target is when ALIGN is
+        entered and moves to the aim point in a straight line at that many
+        px/s. It never lags behind the target: if the target is already
+        closer to the aim point, the setpoint jumps to it -- the ramp only
+        bounds how fast the error is closed, it never pulls the vehicle back.
+        """
+        if self.align_ref_rate <= 0.0:
+            return self.target_x, self.target_y, 0.0, 0.0
+        if self.ref_x is None:
+            self.ref_x, self.ref_y = self.t_x, self.t_y
+        if (math.hypot(self.target_x - self.t_x, self.target_y - self.t_y) <
+                math.hypot(self.target_x - self.ref_x, self.target_y - self.ref_y)):
+            self.ref_x, self.ref_y = self.t_x, self.t_y
+        gap = math.hypot(self.target_x - self.ref_x, self.target_y - self.ref_y)
+        rate = self.align_ref_rate / (self.image_width / 2.0)   # frame-fraction/s
+        step = rate * self.dt
+        if gap <= step:
+            self.ref_x, self.ref_y = self.target_x, self.target_y
+            return self.target_x, self.target_y, 0.0, 0.0
+        ux = (self.target_x - self.ref_x) / gap
+        uy = (self.target_y - self.ref_y) / gap
+        self.ref_x += ux * step
+        self.ref_y += uy * step
+        return self.ref_x, self.ref_y, ux * rate, uy * rate
 
     def compute_desired_tilt(self):
         """Outer IBVS loop: image error -> desired (roll, pitch) in rad.
@@ -2042,8 +2149,15 @@ class IbvsController:
             # image_x_sign / image_y_sign in target_callback. Each PID gets a
             # matched (error, d(error)/dt) pair -- err_x = -t_x, so
             # d(-err_x)/dt = +t_x_dot; err_y = -t_y, so d(err_y)/dt = -t_y_dot.
-            desired_roll = self.pid_x.update(-err_x, self.t_x_dot, self.dt)
-            desired_pitch = self.pid_y.update(-err_y, self.t_y_dot, self.dt)
+            # With the setpoint ramp the PIDs see the error to the MOVING
+            # setpoint (and its rate in the D term, so a steady ramp is
+            # tracked without lag); the ALIGN/ALIGNED test above still uses
+            # the true error.
+            ref_x, ref_y, ref_dx, ref_dy = self.ramp_image_setpoint()
+            desired_roll = self.pid_x.update(self.t_x - ref_x,
+                                             self.t_x_dot - ref_dx, self.dt)
+            desired_pitch = self.pid_y.update(self.t_y - ref_y,
+                                              self.t_y_dot - ref_dy, self.dt)
             self.tilt_hist.append((rospy.Time.now(), desired_roll, desired_pitch))
         else:
             # PIDs not running: clear their debug terms so ibvs/pid_* reads 0
@@ -2157,6 +2271,8 @@ class IbvsController:
         if not self.raw_mode or self.raw_thrust_ok():
             self.publish_setpoint(desired_roll, desired_pitch, thrust)
         self.publish_debug(desired_roll, desired_pitch, thrust)
+        if self.approach_enabled:
+            self.monitor_gripper(desired_roll, desired_pitch)
         if self.mission_mode == MODE_LAND:
             self.maybe_land_disarm()
 
