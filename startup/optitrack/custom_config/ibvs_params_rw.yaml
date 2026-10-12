@@ -99,6 +99,11 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 
+hold_engage_height: true      # thrust_mode 'raw': hold the height where the pilot
+                              # selects GUIDED_NOGPS (align + climb start there)
+                              # instead of ramping to hover_height
+engage_min_height: 0.3        # [m] ...but never below this (engaged on/near the
+                              # ground -> lifts to 0.3 m first)
 hover_height: 1.0             # [m] mission_mode 'hover' ONLY: the fixed height
                               # target held via pid_z below. Set equal to
                               # takeoff_height for a clean test, otherwise
@@ -329,17 +334,20 @@ hover_ramp_speed: 0.3         # [m/s] the setpoint starts at the height you
 # (2026-10-08-09-32-35.bag: 0 % at 0.8-1.2 m, 98 % at 1.4-1.6 m).
 approach_enabled: true
 approach_dwell_s: 5.0         # [s] continuously ALIGNED before the climb starts
-approach_speed: 0.10          # [m/s] climb rate while CLIMBING (aligned). Was 0.05
-                              # until 2026-10-11.
+approach_speed: 0.15          # [m/s] climb rate while CLIMBING (aligned). Was 0.05
+                              # until 2026-10-11, 0.10 until 2026-10-12 (held
+                              # <= 3 cm lateral). 0.15: TTC exact, size to contact
+                              # (11:43). 0.20 tried 2026-10-12 16:11: detector
+                              # dropped 'size' from ~1.3 m up -> no STRIKE.
 max_height: 2.5               # [m] SAFETY limit for the whole approach: CLIMBING
                               # and STRIKE never set the height above it (ArUco
                               # at ~2.3 m; OptiTrack loses the vehicle >~2.5 m)
 
 # --- STRIKE / PUSH / PERCHED (end of the approach) ---------------------------
 #   CLIMBING --(close + aligned within strike_align_px)--> STRIKE: X-Y level,
-#   climb at strike_speed until CONTACT --> PUSH: hover + push_thrust_margin
-#   for push_time_s --> PERCHED if the contact force is still there, else
-#   FAILED (holds height). Contact is watched all the time in CLIMBING and
+#   climb at strike_speed until CONTACT --> PUSH: force ramped to activate the
+#   gripper --> PERCHED once it held gripper_activation_force_n, else FAILED
+#   (back down to where STRIKE started). Contact is watched all the time in CLIMBING and
 #   STRIKE, from IMU + thrust only (topic ibvs/contact, x = force [N]).
 # "Close" (ibvs/closeness): strike_trigger
 #   ttc     image only, works OUTDOORS too: distance = climb speed x
@@ -370,12 +378,28 @@ impact_force_n: 1.2           # [N] impact: one raw IMU sample above this. Was 2
                               # until 2026-10-11: the real hit (0.25 m/s on the
                               # ArUco) peaked at exactly 2.0 N. Free flight raw:
                               # <= 0.16 N (2026-10-11), <= 0.6 N (older bags)
-push_thrust_margin: 0.03      # [throttle] above hover while pushing; with hover
-                              # ~0.16 that is ~1.8 N for 1 kg. RAISE to what the
-                              # gripper needs (max 0.10 = ~6 N)
-push_time_s: 1.0              # [s]
-perched_confirm_ratio: 0.5    # PERCHED if >= this x expected push force remains
+# GRIPPER ACTIVATION (PUSH): the contact force is ramped to activation_margin x
+# gripper_activation_force_n; PERCHED once the measured force (ibvs/contact x)
+# stayed >= gripper_activation_force_n for activation_hold_s. Throttle from
+# F = m g (u/u_hover - 1): 1.8 N at hover 0.151 -> ~0.179. The force is the
+# thrust model's (+0.03 throttle gave 1.8 of 2.0 N on 2026-10-12) -- check it
+# on a scale before trusting larger forces.
+gripper_activation_force_n: 1.5   # [N] force that must be held for PERCHED (push 1.8 N closes the gripper)
+activation_margin: 1.2        # push to 1.2 x 1.5 = 1.8 N (3.0, then 2.3 N on 2026-10-12: 2.3 N lifted the branch 4 cm)
+activation_hold_s: 0.5        # [s] at >= activation force before PERCHED
+push_ramp_s: 0.5              # [s] force ramp 0 -> target after contact (was 0.3: gentler build-up)
+push_timeout_s: 3.0           # [s] activation not reached by then -> FAILED
+push_slip_m: 0.10             # [m] OptiTrack this far above the contact height... (was 0.05: a flexible branch lifted 4.1 cm under 2.3 N, 2026-10-12-11-43-43)
+push_slip_vz: 0.25            # [m/s] ...or rising this fast = slid off (lab only;
+                              # pressed on the branch vz stayed within +-0.05; the 4 cm lift peaked at 0.16)
 perched_thrust_margin: 0.01   # [throttle] light press while PERCHED (pilot takes over)
+# STRUCTURAL LIMIT: the controller never commands, and aborts on measuring,
+# more than this. Push target and predicted impact must each stay below half
+# of it (checked at startup). Cannot be set above 50 N (airframe).
+max_contact_force_n: 50.0     # [N]
+contact_stiffness_n_per_m: 2000.0  # [N/m] stiffest branch+gripper expected, for
+                              # the impact check: peak ~ strike_speed*sqrt(k*m)
+                              # = 11 N at 0.25 m/s (2026-10-12 hit: ~3.4 N)
 pid_z_raw:
   kp: 0.035                   # [throttle/m]  0.5 m low -> +0.018 throttle
   ki: 0.01                    # [throttle/(m*s)] trims a wrong hover throttle

@@ -155,13 +155,14 @@ State machine (this is what makes the controller "modal"):
     TAG_LOST --(tag seen again)--> ALIGN
 
   Approach test (~approach_enabled, thrust_mode 'raw'), see update_approach:
-    ALIGNED --(approach_dwell_s, at hover_height)--> CLIMBING
+    ALIGNED --(approach_dwell_s, at the hold height)--> CLIMBING
     CLIMBING --(not aligned / no tag)--> ALIGN / TAG_LOST   (climb paused,
               back to CLIMBING as soon as ALIGNED again)
     CLIMBING --(close: time-to-contact, and aligned tightly)--> STRIKE
     CLIMBING / STRIKE --(contact: IMU + thrust)--> PUSH
-    PUSH --(push_time_s, contact force still there)--> PERCHED
-    PUSH (no force left) / STRIKE (timeout) --> ALIGN, approach FAILED (hold)
+    PUSH --(force >= gripper_activation_force_n for activation_hold_s)--> PERCHED
+    PUSH (no force left / not reached in push_timeout_s / over
+          max_contact_force_n) / STRIKE (timeout) --> ALIGN, approach FAILED
 
 TAG_IN_SIGHT behaves exactly like HOVER; it is a status distinction for the
 operator: the detector currently sees the tag, so `ibvs/start` will engage
@@ -262,8 +263,8 @@ TAG_LOST = 'TAG_LOST'
 # Approach test states (thrust_mode 'raw', ~approach_enabled):
 #   CLIMBING  aligned and going up (X-Y servo keeps aligning)
 #   STRIKE    committed final climb: X-Y level, faster climb until contact
-#   PUSH      contact detected: thrust above hover to load the gripper
-#   PERCHED   contact force still there after the push
+#   PUSH      contact detected: force ramped up to activate the gripper
+#   PERCHED   activation force delivered and held; light press from now on
 CLIMBING = 'CLIMBING'
 STRIKE = 'STRIKE'
 PUSH = 'PUSH'
@@ -271,6 +272,9 @@ PERCHED = 'PERCHED'
 # states in which the latched heading is held (yaw_setpoint kept)
 YAW_HOLD_STATES = (ALIGN, ALIGNED, CLIMBING, STRIKE, PUSH, PERCHED)
 GRAVITY = 9.81
+# [N] hard structural limit of the airframe: ~max_contact_force_n may lower it,
+# never raise it. More than this between gripper and branch can break the UAV.
+FORCE_LIMIT_N = 50.0
 
 # Mission mode -- what the vertical (thrust/climb-rate) axis does. LAND and
 # PERCH center the target in the image the same way (X-Y IBVS cascade) and
@@ -472,6 +476,13 @@ class IbvsController:
         # and the height PID has a step correction to make right at handoff
         # (harmless, just an avoidable transient).
         self.hover_height = rospy.get_param('~hover_height', 1.0)
+        # thrust_mode 'raw': hold the height the pilot engaged at (never below
+        # engage_min_height, so an engagement on/near the ground lifts off
+        # first) instead of ramping to hover_height; ALIGN and the climb start
+        # from there. hold_height is that target, set at each engagement.
+        self.hold_engage_height = rospy.get_param('~hold_engage_height', False)
+        self.engage_min_height = rospy.get_param('~engage_min_height', 0.3)
+        self.hold_height = None
         kp_z = rospy.get_param('~pid_z/kp', 0.1)
         ki_z = rospy.get_param('~pid_z/ki', 0.0)
         kd_z = rospy.get_param('~pid_z/kd', 0.15)
@@ -583,10 +594,30 @@ class IbvsController:
         self.impact_force_n = rospy.get_param('~impact_force_n', 2.0)
         self.contact_baseline_s = rospy.get_param('~contact_baseline_s', 3.0)
         self.motor_lag_s = rospy.get_param('~motor_lag_s', 0.1)
-        self.push_thrust_margin = rospy.get_param('~push_thrust_margin', 0.03)
-        self.push_time_s = rospy.get_param('~push_time_s', 1.0)
-        self.perched_confirm_ratio = rospy.get_param('~perched_confirm_ratio', 0.5)
+        # GRIPPER ACTIVATION: PUSH ramps the contact force up to
+        # activation_margin x gripper_activation_force_n (the margin covers
+        # the thrust model: +0.03 throttle gave 1.8 of the expected 2.0 N on
+        # 2026-10-12) and PERCHED once the measured force has stayed at or
+        # above the activation force for activation_hold_s. Force <-> throttle:
+        # F = m g (u / u_hover - 1), the same model as the contact estimate.
+        self.activation_force_n = rospy.get_param('~gripper_activation_force_n', 2.5)
+        self.activation_margin = rospy.get_param('~activation_margin', 1.2)
+        self.activation_hold_s = rospy.get_param('~activation_hold_s', 0.5)
+        self.push_ramp_s = rospy.get_param('~push_ramp_s', 0.3)
+        self.push_timeout_s = rospy.get_param('~push_timeout_s', 3.0)
+        # lab safety net: OptiTrack height this far above the contact height,
+        # or rising faster than this, while pushing = slid off / branch gave
+        # way (the force check sees it too, ~0.1 s later)
+        self.push_slip_m = rospy.get_param('~push_slip_m', 0.05)
+        self.push_slip_vz = rospy.get_param('~push_slip_vz', 0.25)
         self.perched_thrust_margin = rospy.get_param('~perched_thrust_margin', 0.01)
+        # STRUCTURAL LIMIT: no contact force above this, ever. Half of it is
+        # the most the push may command and the most the impact may reach
+        # (strike_speed into the stiffest contact expected, peak = v sqrt(k m)),
+        # leaving the other half for model error. Measured > limit -> abort.
+        self.max_contact_force_n = rospy.get_param('~max_contact_force_n', FORCE_LIMIT_N)
+        self.contact_stiffness = rospy.get_param('~contact_stiffness_n_per_m', 2000.0)
+        self.push_force_target = self.activation_margin * self.activation_force_n
         if self.approach_enabled:
             if self.strike_trigger not in (STRIKE_TTC, STRIKE_HEIGHT, STRIKE_OFF):
                 raise rospy.ROSInitException(
@@ -599,11 +630,46 @@ class IbvsController:
             if not 0.0 < self.strike_speed <= 1.0:
                 raise rospy.ROSInitException(
                     "ibvs_controller: strike_speed must be in (0, 1] m/s")
-            if not (0.0 <= self.push_thrust_margin <= 0.10 and
-                    0.0 <= self.perched_thrust_margin <= self.push_thrust_margin):
+            if not 0.0 < self.max_contact_force_n <= FORCE_LIMIT_N:
                 raise rospy.ROSInitException(
-                    "ibvs_controller: need 0 <= perched_thrust_margin <= "
-                    "push_thrust_margin <= 0.10")
+                    "ibvs_controller: max_contact_force_n must be in (0, %.0f] N "
+                    "(airframe limit)" % FORCE_LIMIT_N)
+            half = 0.5 * self.max_contact_force_n
+            if not (self.activation_force_n > 0.0 and self.activation_margin >= 1.0
+                    and self.push_force_target <= half):
+                raise rospy.ROSInitException(
+                    "ibvs_controller: need gripper_activation_force_n > 0, "
+                    "activation_margin >= 1 and their product (%.1f N) <= half "
+                    "of max_contact_force_n (%.1f N)" % (self.push_force_target, half))
+            impact = self.strike_speed * math.sqrt(self.contact_stiffness *
+                                                   self.vehicle_mass)
+            if impact > half:
+                raise rospy.ROSInitException(
+                    "ibvs_controller: strike_speed %.2f m/s into a %.0f N/m "
+                    "contact peaks at ~%.1f N > half of max_contact_force_n "
+                    "(%.1f N) -- strike slower" % (self.strike_speed,
+                                                   self.contact_stiffness,
+                                                   impact, half))
+            push_throttle = self.raw_hover_throttle * (
+                1.0 + self.push_force_target / (self.vehicle_mass * GRAVITY))
+            if push_throttle > 0.9:
+                raise rospy.ROSInitException(
+                    "ibvs_controller: pushing %.1f N needs throttle %.2f -- the "
+                    "vehicle cannot do that with margin" % (self.push_force_target,
+                                                            push_throttle))
+            if not (self.push_ramp_s >= 0.0 and self.activation_hold_s > 0.0 and
+                    self.push_timeout_s > self.push_ramp_s + self.activation_hold_s):
+                raise rospy.ROSInitException(
+                    "ibvs_controller: need push_timeout_s > push_ramp_s + "
+                    "activation_hold_s")
+            if not 0.0 <= self.perched_thrust_margin <= 0.03:
+                raise rospy.ROSInitException(
+                    "ibvs_controller: perched_thrust_margin must be in [0, 0.03]")
+            rospy.loginfo("ibvs_controller: gripper activation %.1f N -> push "
+                          "%.1f N (throttle ~%.3f), impact at %.2f m/s <= ~%.1f N, "
+                          "structural limit %.0f N", self.activation_force_n,
+                          self.push_force_target, push_throttle, self.strike_speed,
+                          impact, self.max_contact_force_n)
         self.approach = APP_IDLE if self.approach_enabled else APP_OFF
         self.approach_aligned_since = None
         self.climb_steady_since = None   # climbing at approach_speed since
@@ -612,6 +678,11 @@ class IbvsController:
         self.strike_start_height = None
         self.fail_height = None
         self.push_started = None
+        self.push_contact_z = None       # OptiTrack height when PUSH began
+        self.push_expected = 0.0         # model force, filtered like the estimate
+        self.activation_since = None     # force >= activation since
+        self.push_peak = 0.0             # highest filtered force this push
+        self.contact_overload = None     # force above max_contact_force_n [N]
         self.size_hist = collections.deque(maxlen=200)   # (t, size px)
         # commanded X-Y tilt while servoing (control thread only): its mean
         # over the last trim_window_s before STRIKE is the trim held blind
@@ -1426,6 +1497,7 @@ class IbvsController:
             # standing error every time (2026-09-29: -0.004..-0.012, the
             # same each engagement). Bounded by pid_z_raw/i_max.
             self.z_ref = None
+            self.hold_height = None
             self.approach_aligned_since = None
             self.climb_steady_since = None
             self.strike_ok_since = None
@@ -1447,9 +1519,11 @@ class IbvsController:
             # where it is instead of dropping back to an old setpoint.
             if odom is not None and age <= self.raw_odom_timeout:
                 self.z_ref = odom.pose.pose.position.z
-            margin = (self.push_thrust_margin if self.state == PUSH
-                      else self.perched_thrust_margin)
-            return self.hover_throttle_est() + margin
+            if self.state == PERCHED:
+                return self.hover_throttle_est() + self.perched_thrust_margin
+            # F = m g (u / u_hover - 1)  ->  u = u_hover (1 + F / (m g))
+            return self.hover_throttle_est() * (
+                1.0 + self.push_force_ref() / (self.vehicle_mass * GRAVITY))
         if odom is None or age > self.raw_odom_timeout:
             rospy.logerr_throttle(
                 1.0, "ibvs_controller: RAW thrust with no fresh OptiTrack "
@@ -1463,9 +1537,12 @@ class IbvsController:
 
         if self.z_ref is None:
             self.z_ref = height
+            self.hold_height = (
+                min(max(height, self.engage_min_height), self.max_height)
+                if self.hold_engage_height else self.hover_height)
             rospy.loginfo("ibvs_controller: height hold engaged at %.2f m, "
-                          "ramping to %.2f m at %.2f m/s", height,
-                          self.hover_height, self.hover_ramp_speed)
+                          "holding %.2f m (ramp %.2f m/s)", height,
+                          self.hold_height, self.hover_ramp_speed)
             if self.approach_enabled:
                 self.set_approach(APP_WAITING, "engaged at %.2f m" % height)
         goal, speed = self.approach_goal()
@@ -1496,14 +1573,15 @@ class IbvsController:
 
         Pure: the approach status is decided in update_approach(), which runs
         earlier in the same control tick.
-          plain hold / WAITING   hover_height at hover_ramp_speed
+          plain hold / WAITING   hold_height at hover_ramp_speed (hover_height,
+                                 or the engagement height: hold_engage_height)
           state CLIMBING         max_height at approach_speed
           state STRIKE           max_height at strike_speed
           FAILED                 back to where STRIKE started, hover_ramp_speed
           anything else          hold z_ref (PAUSED)
         """
         if not self.approach_enabled or self.approach == APP_WAITING:
-            return self.hover_height, self.hover_ramp_speed
+            return self.hold_height, self.hover_ramp_speed
         if self.state == STRIKE:
             return self.max_height, self.strike_speed
         if self.state == CLIMBING and self.approach == APP_CLIMBING:
@@ -1531,34 +1609,75 @@ class IbvsController:
         contact = self.update_contact(now)
         st = self.state
 
+        if self.contact_overload is not None:
+            over, self.contact_overload = self.contact_overload, None
+            if st in (CLIMBING, STRIKE, PUSH, PERCHED):
+                rospy.logerr("ibvs_controller: CONTACT FORCE %.1f N ABOVE THE %.0f N "
+                             "STRUCTURAL LIMIT -- stopping the push" %
+                             (over, self.max_contact_force_n))
+                self.fail_approach("contact force %.1f N over the %.0f N limit" %
+                                   (over, self.max_contact_force_n))
+                return
         if st in (CLIMBING, STRIKE) and contact:
             self.transition(PUSH)
             self.push_started = now
-            self.set_approach(APP_PUSH, "contact (%s) at %.2f m -> +%.3f "
-                              "throttle for %.1f s" % (
+            self.push_expected = 0.0
+            self.push_peak = 0.0
+            self.activation_since = None
+            self.push_contact_z = self.fresh_odom_height(now)
+            self.set_approach(APP_PUSH, "contact (%s) at %.2f m -> pushing %.1f N "
+                              "(gripper needs %.1f N for %.1f s)" % (
                                   self.contact_reason, self.z_ref,
-                                  self.push_thrust_margin, self.push_time_s))
+                                  self.push_force_target, self.activation_force_n,
+                                  self.activation_hold_s))
             return
         if st == PUSH:
-            expected = (self.vehicle_mass * GRAVITY * self.push_thrust_margin /
-                        self.hover_throttle_est())
             t_push = (now - self.push_started).to_sec()
-            # Lost the branch mid-push (bounced off / it gave way): the extra
-            # thrust is now accelerating us upward -- stop at once instead of
-            # pushing into free air for the rest of push_time_s.
-            if (t_push >= 0.25 and
-                    self.mean_contact_force(now, 0.15) < 0.3 * expected):
-                self.fail_approach("contact lost %.2f s into the push" % t_push)
+            # what the commanded thrust should press with, filtered like the
+            # estimate so the two are comparable during the ramp
+            model = self.vehicle_mass * GRAVITY * (
+                self.thrust_applied / self.hover_throttle_est() - 1.0)
+            self.push_expected += (min(1.0, self.dt / self.contact_filter_s) *
+                                   (model - self.push_expected))
+            held = self.mean_contact_force(now, 0.15)
+            self.push_peak = max(self.push_peak, held)
+            # Lost the branch mid-push (bounced off / slid off / it gave way):
+            # the extra thrust is now accelerating us upward -- stop at once.
+            if (t_push >= 0.25 and self.push_expected >= 1.0 and
+                    held < 0.3 * self.push_expected):
+                self.fail_approach("contact lost %.2f s into the push (%.1f of "
+                                   "%.1f N)" % (t_push, held, self.push_expected))
                 return
-            if t_push >= self.push_time_s:
-                held = self.mean_contact_force(now, 0.3)
-                if held >= self.perched_confirm_ratio * expected:
+            # lab: OptiTrack sees it ~0.1 s sooner (pressed on the branch vz
+            # stays within +-0.05 m/s; free, the push accelerates us upward).
+            # vz only after 0.15 s: the impact is still braking us at first
+            # (2026-10-12-10-32-06.bag: 0.23 m/s at PUSH, <= 0.05 from 0.15 s)
+            z = self.fresh_odom_height(now)
+            if z is not None and self.push_contact_z is not None:
+                vz = self.last_odom.twist.twist.linear.z
+                if (z > self.push_contact_z + self.push_slip_m or
+                        (t_push >= 0.15 and vz > self.push_slip_vz)):
+                    self.fail_approach("moving up while pushing (%.2f m above "
+                                       "the contact, %.2f m/s) -- slid off or the "
+                                       "branch gave way" % (z - self.push_contact_z, vz))
+                    return
+            if held >= self.activation_force_n:
+                if self.activation_since is None:
+                    self.activation_since = now
+                elif (now - self.activation_since).to_sec() >= self.activation_hold_s:
                     self.transition(PERCHED)
-                    self.set_approach(APP_PERCHED, "%.1f N still pressing after "
-                                      "the push (expected %.1f N)" % (held, expected))
-                else:
-                    self.fail_approach("only %.1f N after the push (expected "
-                                       "%.1f N) -- not perched" % (held, expected))
+                    self.set_approach(APP_PERCHED, "gripper activation force "
+                                      "delivered: >= %.1f N for %.1f s (peak %.1f N)"
+                                      % (self.activation_force_n,
+                                         self.activation_hold_s, self.push_peak))
+                    return
+            else:
+                self.activation_since = None
+            if t_push >= self.push_timeout_s:
+                self.fail_approach("gripper activation force not reached: peak "
+                                   "%.1f of %.1f N in %.1f s" % (
+                                       self.push_peak, self.activation_force_n,
+                                       self.push_timeout_s))
             return
         if st == PERCHED:
             return
@@ -1569,7 +1688,7 @@ class IbvsController:
             return
 
         if self.approach == APP_WAITING:
-            at_hover = abs(self.z_ref - self.hover_height) < 1e-6
+            at_hover = abs(self.z_ref - self.hold_height) < 1e-6
             if st == ALIGNED and at_hover:
                 if self.approach_aligned_since is None:
                     self.approach_aligned_since = now
@@ -1715,6 +1834,20 @@ class IbvsController:
         """Throttle that just holds the vehicle: configured + learned trim."""
         return self.raw_hover_throttle + self.pid_z_raw.ki * self.pid_z_raw.integral
 
+    def push_force_ref(self):
+        """PUSH force setpoint [N]: ramped from 0 to push_force_target over
+        push_ramp_s, never above half the structural limit."""
+        t = (rospy.Time.now() - self.push_started).to_sec()
+        ramp = 1.0 if self.push_ramp_s <= 0.0 else min(1.0, t / self.push_ramp_s)
+        return min(self.push_force_target * ramp, 0.5 * self.max_contact_force_n)
+
+    def fresh_odom_height(self, now):
+        """OptiTrack height [m], or None if there is none or it is stale."""
+        if (self.last_odom is None or
+                (now - self.last_odom_time).to_sec() > self.raw_odom_timeout):
+            return None
+        return self.last_odom.pose.pose.position.z
+
     def contact_force_raw(self, a_z):
         """mass * (g * applied_throttle / hover_throttle - a_z) [N]."""
         return self.vehicle_mass * (GRAVITY * self.thrust_applied /
@@ -1760,6 +1893,8 @@ class IbvsController:
         m.point.z = self.thrust_applied
         self.contact_pub.publish(m)
 
+        if max(force, impact) > self.max_contact_force_n:
+            self.contact_overload = max(force, impact)
         if self.state not in (CLIMBING, STRIKE):
             self.contact_since = None
             return False
@@ -2166,7 +2301,7 @@ class IbvsController:
         h.point.x = self.z_ref if self.z_ref is not None else self.hover_height
         if self.last_odom is not None:
             h.point.y = self.last_odom.pose.pose.position.z
-            h.point.z = self.hover_height - h.point.y
+            h.point.z = h.point.x - h.point.y
         else:
             h.point.y = float('nan')
             h.point.z = float('nan')
