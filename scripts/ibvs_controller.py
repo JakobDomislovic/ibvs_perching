@@ -410,11 +410,12 @@ class Pid:
 
     def update(self, error, error_dot, dt, integrate=True):
         """integrate=False freezes the integral (still applied, not grown):
-        conditional integration, so a large transient cannot wind it up."""
+        conditional integration, so a large transient cannot wind it up. A
+        number in (0, 1] integrates at that fraction of the rate."""
         i_term = 0.0
         if self.ki > 0.0:
             if integrate:
-                self.integral += error * dt
+                self.integral += error * dt * float(integrate)
             # anti-windup: keep the integral contribution bounded
             self.integral = clamp(self.integral,
                                   -self.i_max / self.ki, self.i_max / self.ki)
@@ -557,15 +558,129 @@ class IbvsController:
         # distance to ~5 % per frame, 2.8 cm after 0.3 s, outliers 21-28 cm
         # (gated by size_jump).
         self.height_source = rospy.get_param('~height_source', HEIGHT_OPTITRACK)
+        # Damping (D) source for the size hold:
+        #   imu     vertical speed from the IMU accelerometer, leaky-integrated
+        #           (m/s, no lag); D gain pid_z_size/kd_vz [throttle per m/s]
+        #   vision  expansion rate d ln(size)/dt; D gain pid_z_size/kd
+        # 2026-10-13-11-41-47 vs OptiTrack: vision rate (0.5 s) 0.17 m/s error
+        # (more than the motion itself: 2.6 cm height jitter), IMU (tau 0.7 s)
+        # 0.07 m/s with no lag.
+        #   fused   IMU speed pulled toward the size-growth speed (rate x
+        #           size_distance_nominal) with size_fused_tau: IMU for fast
+        #           motion (no lag), size for slow motion and the IMU drift.
+        #           12:26 replay: 0.05-0.06 m/s error, corr 0.97, no lag --
+        #           vision alone 0.25 m/s (1.6 s oscillation), IMU alone
+        #           blind to slow motion (11:56 +-17 cm wander).
+        self.size_damping = rospy.get_param('~size_damping', 'imu')
+        if self.size_damping not in ('imu', 'vision', 'fused'):
+            raise rospy.ROSInitException(
+                "ibvs_controller: size_damping must be 'imu', 'vision' or 'fused'")
+        kd_size = (rospy.get_param('~pid_z_size/kd_vz', 0.04)
+                   if self.size_damping in ('imu', 'fused') else
+                   rospy.get_param('~pid_z_size/kd', 0.06))
+        self.size_fused_tau = rospy.get_param('~size_fused_tau', 1.5)
+        # [m] turns the size growth rate (1/s) into m/s for the fused speed;
+        # only the SLOW part depends on it (lab: ~1.6 m below the branch)
+        self.size_distance_nominal = rospy.get_param('~size_distance_nominal', 1.6)
+        self.size_v_vis = 0.0     # size-growth speed [m/s], control thread
+        self.size_v_valid = False  # size_v_vis usable (fresh size, >= 4 samples)
+        # fused: the accelerometer BIAS is estimated through the size growth
+        # too (2-state complementary filter, critically damped: k2 = k1^2/4
+        # with k1 = 1/size_fused_tau). A bias learned only from the IMU mean
+        # was 0.3+ m/s^2 off right after spin-up (12:34 E1: fused speed -0.55
+        # m/s at a true -0.09 -> pushed the vehicle up into the fence).
+        self.size_bias_k2 = rospy.get_param(
+            '~size_fused_bias_gain', 0.25 / self.size_fused_tau ** 2)
+        # FAST bias learning while the pilot flies (WAIT_ARM): the bias jumps
+        # when the motors spin up (12:34: ~-0.1 m/s^2 in flight), and nothing
+        # depends on the estimate yet. Engaged: slow, for a smooth hold.
+        # 12:34 replay: at E1 (3.5 s after takeoff) -0.10 vs true -0.09 m/s
+        # (slow only: -0.49), E3 hold unchanged (0.033 m/s).
+        self.size_bias_k2_fast = rospy.get_param('~size_fused_bias_gain_fast', 1.0)
+        # SIZE GAPS (no detection, or size distrusted): keep integrating the
+        # IMU with the bias the size had just taught it and leak only slowly
+        # (size_gap_tau), so the damping still holds the vertical speed. A
+        # 1.5 s leak forgot a steady sink: 15:20 E2 sank 0.5 m in 2.6 s after
+        # the detections stopped (vz -0.08 -> -0.24, damping ~0). After
+        # size_gap_max_s without size the bias is no longer trusted.
+        self.size_gap_tau = rospy.get_param('~size_gap_tau', 20.0)
+        self.size_gap_max_s = rospy.get_param('~size_gap_max_s', 10.0)
+        self.size_vis_last = None     # IMU stamp of the last size correction
+        # ...and HOLD the height inertially through the gap: integrate that
+        # speed from the moment the size went away and push back with
+        # size_gap_kp [throttle per m] (= pid_z_raw kp). 15:20 replay: the
+        # integrated drop after 3 s was 0.41 m vs a true 0.46 m.
+        self.size_gap_kp = rospy.get_param('~size_gap_kp', 0.035)
+        # HARD LIMITS on what a wrong speed estimate can do (16:06: a drifted
+        # IMU speed of -0.6 m/s at engagement commanded full climb): the
+        # damping sees at most +-size_damp_max_vz, the gap hold at most
+        # +-size_gap_max_h. And a level jump above size_jump_max is not a
+        # branch piece but a wrong detection: not shifted, rejected.
+        self.size_damp_max_vz = rospy.get_param('~size_damp_max_vz', 0.4)
+        self.size_gap_max_h = rospy.get_param('~size_gap_max_h', 0.5)
+        self.size_jump_max = rospy.get_param('~size_jump_max', 1.5)
+        self.size_gap_h = 0.0         # integrated height change in the gap [m]
+        self.size_gap_t0 = None       # gap start (control time)
+        self.size_had_ref = False     # a reference existed this engagement
+        # E: the reference is only captured while the vehicle is about still
+        # (|vertical speed| below this); until then hover + trim + damping
+        # only. 14:33 E2/E3: engaged climbing 0.25 m/s -> fence.
+        self.size_engage_max_vz = rospy.get_param('~size_engage_max_vz', 0.15)
+        # F: size must agree with the IMU. The size-growth speed vs the fused
+        # speed differing by more than size_consistency_mps for
+        # size_consistency_s = not this branch (14:33 E2: 35 -> 55 px in 1.3 s
+        # = 0.5 m/s approach while the IMU said ~0.1) -> size ignored (damping
+        # only) until it agrees again, then the reference is re-captured.
+        self.size_consistency_mps = rospy.get_param('~size_consistency_mps', 0.3)
+        self.size_consistency_s = rospy.get_param('~size_consistency_s', 0.4)
+        self.size_inconsistent = False
+        self.size_incons_time = 0.0
+        self.size_cons_time = 0.0
+        # F: after a detection gap, a size more than size_ratio_max times off
+        # the recent typical size (EMA over size_typical_tau_s, kept for
+        # size_typical_keep_s) is refused -- another object, not the branch.
+        self.size_ratio_max = rospy.get_param('~size_ratio_max', 2.0)
+        self.size_typical_tau_s = rospy.get_param('~size_typical_tau_s', 3.0)
+        self.size_typical_keep_s = rospy.get_param('~size_typical_keep_s', 10.0)
+        self.y_typical = None
+        self.y_typical_t = None
+        # C: a LEVEL JUMP of the size between consecutive detections (no
+        # detection gap: the gate rejected everything for size_timeout_s and
+        # then re-seeded) is the detector measuring another piece of the
+        # branch, not motion -- the reference is shifted by the same jump
+        # (11:59: +20 % at one height -> descended into the fence)
+        self.size_last_sample_t = None
+        self.size_ref_shifts = collections.deque()   # detection -> control
+        # G: the size integral learns during ALIGN too, at this fraction of
+        # its rate (slow trim errors: battery, ground effect while hovering);
+        # full rate once ALIGNED on the final reference
+        self.size_align_ki_ratio = rospy.get_param('~size_align_ki_ratio', 0.5)
         self.pid_z_size = Pid(rospy.get_param('~pid_z_size/kp', 0.05),
                               rospy.get_param('~pid_z_size/ki', 0.015),
-                              rospy.get_param('~pid_z_size/kd', 0.06),
+                              kd_size,
                               -self.raw_thrust_margin, self.raw_thrust_margin,
                               rospy.get_param('~pid_z_size/i_max', 0.035))
+        # IMU vertical speed: v += (a_z_world - bias) dt - v dt / imu_vz_tau,
+        # bias = slow mean of a_z_world (a held height averages to 0)
+        self.imu_vz_tau = rospy.get_param('~imu_vz_tau', 0.7)
+        self.imu_bias_tau = rospy.get_param('~imu_bias_tau', 5.0)
+        self.imu_vz = 0.0
+        self.imu_az_bias = None
+        self.imu_last_stamp = None
+        self.size_ref_final = False   # True once re-captured at ALIGNED
         self.size_rate_window_s = rospy.get_param('~size_rate_window_s', 0.5)
         self.size_jump = rospy.get_param('~size_jump', 0.15)       # max |d ln| accepted
         self.size_timeout_s = rospy.get_param('~size_timeout_s', 0.5)
         self.size_filter_alpha = rospy.get_param('~size_filter_alpha', 0.4)
+        # median of the last size_median samples BEFORE the gate: removes
+        # single-frame spikes of any size for (n-1)/2 frames of delay (~40 ms
+        # at 3). 2026-10-13 11:56/11:59: 100-110 spikes > 5 % per flight, only
+        # 2-4 > 15 % (caught by size_jump); frame-to-frame noise 0.016 -> 0.010
+        self.size_median = int(rospy.get_param('~size_median', 1))
+        if self.size_median < 1 or self.size_median % 2 == 0:
+            raise rospy.ROSInitException(
+                "ibvs_controller: size_median must be odd and >= 1 (1 = off)")
+        self.y_window = collections.deque(maxlen=self.size_median)
         # Off-centre correction. The branch is a long cylinder about parallel
         # to the image: ALONG it the image width is constant, but seen at an
         # angle theta ACROSS it, it looks WIDER: width = f*D / (d * cos theta).
@@ -1291,7 +1406,13 @@ class IbvsController:
         # apparent target size [px] for time-to-contact (0 = not sent)
         if msg.point.z > 0.0:
             self.size_hist.append((now, float(msg.point.z)))
-            self.update_size_height(now, msg, half_w, half_h)
+            # FRAME time (header: detector frame time from its 'age' field),
+            # not arrival: the virtual camera forwards after a variable wait
+            # for the IMU, and that jitter reset the median / gate and
+            # roughened the expansion rate (2026-10-13-11-59-17 replay: noise
+            # 0.026 on arrival time, 0.015 on frame time, rejections 22 -> 10)
+            stamp = msg.header.stamp if not msg.header.stamp.is_zero() else now
+            self.update_size_height(stamp, msg, half_w, half_h)
 
         # pixel error: detection minus the aim point, in the IMAGE frame
         # (no signs, no normalization) -- positive x = right of centre,
@@ -1353,6 +1474,7 @@ class IbvsController:
 
     def imu_callback(self, msg):
         self.last_imu = msg
+        self.update_imu_vz(msg)
         rate = math.degrees(math.hypot(msg.angular_velocity.x, msg.angular_velocity.y))
         if rate > self.gyro_peak:
             self.gyro_peak = rate
@@ -1619,6 +1741,11 @@ class IbvsController:
             self.z_ref = None
             self.hold_height = None
             self.y_ref = None
+            self.size_ref_final = False
+            self.size_had_ref = False
+            self.size_gap_h = 0.0
+            self.size_gap_t0 = None
+            self.size_ref_shifts.clear()
             self.size_engage_z = None
             self.size_fence_tripped = False
             self.approach_aligned_since = None
@@ -1995,20 +2122,111 @@ class IbvsController:
             return self.pid_z_size
         return self.pid_z_raw
 
+    def update_imu_vz(self, msg):
+        """Vertical speed [m/s, up +] from the accelerometer: world-z
+        specific force - g - bias, leaky-integrated (imu_vz_tau) so the bias
+        that is left cannot run away. Needs no position sensor."""
+        q = msg.orientation
+        a = msg.linear_acceleration
+        az = (2.0 * (q.x * q.z - q.y * q.w) * a.x +
+              2.0 * (q.y * q.z + q.x * q.w) * a.y +
+              (1.0 - 2.0 * (q.x * q.x + q.y * q.y)) * a.z - GRAVITY)
+        stamp = msg.header.stamp.to_sec()
+        last, self.imu_last_stamp = self.imu_last_stamp, stamp
+        if last is None:
+            return
+        dt = stamp - last
+        if not 0.0 < dt < 0.2:           # gap or reorder: skip, keep the estimate
+            return
+        if self.imu_az_bias is None:
+            self.imu_az_bias = az
+        if self.size_damping == 'fused' and self.size_v_valid:
+            # 2-state complementary filter: integrate the IMU, pull the speed
+            # toward the size-growth speed (k1) and correct the bias with the
+            # same mismatch (k2) -- the size growth fixes both slow errors
+            innov = self.size_v_vis - self.imu_vz
+            if abs(innov) > self.size_consistency_mps:
+                # size disagrees with the IMU: do not let it pull (IMU only,
+                # with a leak), and after size_consistency_s distrust it
+                self.size_incons_time += dt
+                self.size_cons_time = 0.0
+                if (not self.size_inconsistent and
+                        self.size_incons_time >= self.size_consistency_s):
+                    self.size_inconsistent = True
+                    rospy.logwarn("ibvs_controller: SIZE INCONSISTENT with the IMU "
+                                  "(size says %+.2f m/s, IMU %+.2f) -- ignoring size",
+                                  self.size_v_vis, self.imu_vz)
+                self.imu_vz += ((az - self.imu_az_bias) * dt -
+                                self.imu_vz * dt / self.gap_leak_tau(stamp))
+                return
+            self.size_cons_time += dt
+            self.size_incons_time = 0.0
+            if self.size_inconsistent and self.size_cons_time >= self.size_consistency_s:
+                self.size_inconsistent = False
+                rospy.loginfo("ibvs_controller: size consistent with the IMU again")
+            k2 = self.size_bias_k2_fast if self.state == WAIT_ARM else self.size_bias_k2
+            self.imu_az_bias -= k2 * innov * dt
+            self.imu_vz += ((az - self.imu_az_bias) * dt +
+                            innov * dt / self.size_fused_tau)
+            self.size_vis_last = stamp
+            return
+        if self.size_damping == 'fused' and self.gap_leak_tau(stamp) > self.size_fused_tau:
+            # short size gap while ENGAGED: the bias learned through the size
+            # still holds -- integrate it with a slow leak
+            self.imu_vz += ((az - self.imu_az_bias) * dt -
+                            self.imu_vz * dt / self.size_gap_tau)
+            return
+        # no usable size (or not fused): bias = slow mean of the IMU, speed
+        # leaks to 0 so what is left of the bias cannot run away
+        self.imu_az_bias += min(1.0, dt / self.imu_bias_tau) * (az - self.imu_az_bias)
+        tau = self.size_fused_tau if self.size_damping == 'fused' else self.imu_vz_tau
+        self.imu_vz += (az - self.imu_az_bias) * dt - self.imu_vz * dt / tau
+
+    def gap_leak_tau(self, stamp):
+        """Leak of the IMU speed without a size correction: slow (size_gap_tau)
+        only while ENGAGED and within size_gap_max_s of the last good size
+        correction; otherwise the fast size_fused_tau (16:06: a slow leak
+        through a long distrusted stretch before engagement drifted 0.6 m/s)."""
+        if (self.state != WAIT_ARM and self.size_vis_last is not None and
+                stamp - self.size_vis_last <= self.size_gap_max_s):
+            return self.size_gap_tau
+        return self.size_fused_tau
+
     def update_size_height(self, now, msg, half_w, half_h):
         """Detection thread: ln(size) corrected for viewing the branch
-        off-centre (size_slant_axis), gated for jumps, lightly filtered. Only
-        stores; the control loop reads it."""
+        off-centre (size_slant_axis), median of the last size_median samples
+        (single-frame spikes), gated for jumps, lightly filtered. Only stores;
+        the control loop reads it (the expansion rate uses the medians too)."""
         size = float(msg.point.z)
         if self.size_fx > 0.0 and self.size_slant_axis != 'none':
             off = (msg.point.x - half_w if self.size_slant_axis == 'u'
                    else msg.point.y - half_h)
             # x cos(theta across): 400 px off = 8.6 % (12 cm at 1.5 m)
             size /= math.sqrt(1.0 + (off / self.size_fx) ** 2)
-        y = math.log(size)
         stale = (self.y_last_accept is None or
                  (now - self.y_last_accept).to_sec() > self.size_timeout_s)
+        no_gap = (self.size_last_sample_t is not None and
+                  (now - self.size_last_sample_t).to_sec() < 0.2)
+        self.size_last_sample_t = now
+        y_before = self.y_filt
+        if stale:
+            self.y_window.clear()      # no median across a detection gap
+        self.y_window.append(math.log(size))
+        y = sorted(self.y_window)[len(self.y_window) // 2]
+        typical_fresh = (self.y_typical is not None and
+                         (now - self.y_typical_t).to_sec() <= self.size_typical_keep_s)
+        if ((stale or self.y_filt is None) and typical_fresh and
+                abs(y - self.y_typical) > math.log(self.size_ratio_max)):
+            self.y_rejected += 1       # far off the recent branch size: another object
+            return
         if stale or self.y_filt is None:
+            if stale and no_gap and y_before is not None:
+                # detections kept coming but were all rejected: a level jump
+                if (abs(y - y_before) > math.log(self.size_jump_max) and
+                        (now - self.y_last_accept).to_sec() <= self.size_typical_keep_s):
+                    self.y_rejected += 1   # too big for a branch piece: wrong detection
+                    return
+                self.size_ref_shifts.append(y - y_before)
             self.y_filt = y
         elif abs(y - self.y_filt) <= self.size_jump:
             self.y_filt += self.size_filter_alpha * (y - self.y_filt)
@@ -2017,16 +2235,24 @@ class IbvsController:
             return
         self.y_last_accept = now
         self.y_hist.append((now, y))
+        if self.y_typical is None or not typical_fresh:
+            self.y_typical = y
+        else:
+            k = min(1.0, (now - self.y_typical_t).to_sec() / self.size_typical_tau_s)
+            self.y_typical += k * (y - self.y_typical)
+        self.y_typical_t = now
 
     def size_height_measurement(self, now):
-        """(filtered ln size, d ln size/dt) or (None, 0.0) if no fresh size."""
+        """(filtered ln size, d ln size/dt): (None, None) if no fresh size,
+        rate None if fewer than 4 samples in size_rate_window_s."""
         if (self.y_last_accept is None or
                 (now - self.y_last_accept).to_sec() > self.size_timeout_s):
-            return None, 0.0
+            return None, None
         pts = [((t - now).to_sec(), y) for t, y in list(self.y_hist)
                if (now - t).to_sec() <= self.size_rate_window_s]
-        rate = 0.0
+        rate = None
         if len(pts) >= 4:
+            rate = 0.0
             n = float(len(pts))
             tm = sum(p[0] for p in pts) / n
             ym = sum(p[1] for p in pts) / n
@@ -2056,24 +2282,106 @@ class IbvsController:
             self.z_ref = z
             self.hold_height = self.size_engage_z
             rospy.logerr("ibvs_controller: SIZE HOLD left the +-%.2f m fence "
-                         "(OptiTrack %.2f m, engaged at %.2f m) -- holding on "
+                         "(OptiTrack %.2f m, hold height %.2f m) -- holding on "
                          "OptiTrack, back to %.2f m, for this engagement",
                          self.size_fence_m, z, self.size_engage_z,
                          self.size_engage_z)
             return None
         y, rate = self.size_height_measurement(now)
+        error_dot = (-(rate or 0.0) if self.size_damping == 'vision' else
+                     -clamp(self.imu_vz, -self.size_damp_max_vz, self.size_damp_max_vz))
+        if y is not None and self.size_inconsistent:
+            # F: the size disagrees with the IMU (another object, a detector
+            # switch): ignore it, and re-capture the reference when it agrees
+            # again (immediately final if still ALIGNED)
+            y = None
+            self.y_ref = None
+            self.size_ref_final = False
+            why = "size inconsistent with the IMU"
+        else:
+            why = "no fresh size"
         if y is None:
-            rospy.logwarn_throttle(
-                1.0, "ibvs_controller: HEIGHT FROM SIZE: no fresh size -- "
-                     "holding hover throttle + trim (open loop), PILOT READY")
-            return self.raw_hover_throttle + pid.ki * pid.integral
+            # no size: no height reference, but keep DAMPING on the IMU speed
+            # (12:34 E2: engaged climbing 0.4 m/s with no detections, flew on
+            # open loop with no damping into the fence), and once the hold had
+            # a reference, hold the height INERTIALLY through the gap
+            if self.size_had_ref:
+                if self.size_gap_t0 is None:
+                    self.size_gap_t0 = now
+                    self.size_gap_h = 0.0
+                if (now - self.size_gap_t0).to_sec() <= self.size_gap_max_s:
+                    self.size_gap_h += self.imu_vz * self.dt
+                    return self.size_damping_only(pid, error_dot, why, self.size_gap_h)
+            return self.size_damping_only(pid, error_dot, why)
+        self.size_gap_t0 = None
+        self.size_gap_h = 0.0
         if self.y_ref is None:
+            # E: capture the reference only while about still
+            v = (self.imu_vz if self.size_damping != 'vision'
+                 else (rate or 0.0) * self.size_distance_nominal)
+            if abs(v) > self.size_engage_max_vz:
+                return self.size_damping_only(
+                    pid, error_dot, "WAITING to capture the reference: moving "
+                    "%+.2f m/s (> %.2f)" % (v, self.size_engage_max_vz))
             self.y_ref = y
+            self.size_had_ref = True
+            self.size_ref_shifts.clear()   # only jumps AFTER the capture count
             rospy.loginfo("ibvs_controller: size height hold engaged: holding "
-                          "size %.1f px%s", math.exp(y),
+                          "size %.1f px%s (provisional until ALIGNED)", math.exp(y),
                           (" (OptiTrack %.2f m)" % z) if z is not None else "")
+        # The reference taken at engagement is PROVISIONAL: off-centre the
+        # detector measures another piece of the branch, which on a sloped or
+        # tapered branch has another size at the same height (11:41: 287 px
+        # along the branch at engagement -> settled 22 cm higher once
+        # aligned). Re-capture it once ALIGNED (no jump: the current value).
+        while self.size_ref_shifts:
+            shift = self.size_ref_shifts.popleft()
+            if self.y_ref is not None:
+                self.y_ref += shift
+                rospy.logwarn("ibvs_controller: size LEVEL JUMP %+.0f %% (detector "
+                              "on another piece of the branch) -- reference "
+                              "shifted with it, height kept", 100.0 * (math.exp(shift) - 1))
+        if not self.size_ref_final and self.state == ALIGNED:
+            self.y_ref = y
+            self.size_ref_final = True
+            self.size_ref_shifts.clear()
+            # D: the fence is centred where the hold actually holds
+            if z is not None:
+                self.size_engage_z = z
+            rospy.loginfo("ibvs_controller: size reference re-captured at "
+                          "ALIGNED: holding size %.1f px%s", math.exp(y),
+                          (" (OptiTrack %.2f m)" % z) if z is not None else "")
+        # G: the integral learns at full rate once ALIGNED on the final
+        # reference, slower during ALIGN (the provisional one is biased)
+        if self.state == ALIGNED and self.size_ref_final:
+            weight = 1.0
+        elif self.state == ALIGN:
+            weight = self.size_align_ki_ratio
+        else:
+            weight = 0.0
         error = self.y_ref - y
-        delta = pid.update(error, -rate, self.dt)
+        delta = pid.update(error, error_dot, self.dt, integrate=weight)
+        return self.raw_hover_throttle + delta
+
+    def size_damping_only(self, pid, error_dot, why, gap_h=None):
+        """Size hold without a usable size: hover throttle + learned trim +
+        damping on the IMU speed (none in 'vision' mode: no size, no rate),
+        plus, in a gap after a reference existed, a push back toward the
+        height the gap started at (gap_h = integrated IMU height change)."""
+        if gap_h is None:
+            rospy.logwarn_throttle(
+                1.0, "ibvs_controller: HEIGHT FROM SIZE: %s -- hover throttle + "
+                     "trim, IMU damping only, PILOT READY" % why)
+        else:
+            rospy.logwarn_throttle(
+                1.0, "ibvs_controller: HEIGHT FROM SIZE: %s -- holding the height "
+                     "on the IMU (moved %+.2f m since), PILOT READY" % (why, gap_h))
+        delta = pid.update(0.0, error_dot if self.size_damping != 'vision' else 0.0,
+                           self.dt, integrate=False)
+        if gap_h is not None and self.size_damping != 'vision':
+            gap_h = clamp(gap_h, -self.size_gap_max_h, self.size_gap_max_h)
+            delta = clamp(delta - self.size_gap_kp * gap_h,
+                          -self.raw_thrust_margin, self.raw_thrust_margin)
         return self.raw_hover_throttle + delta
 
     def push_force_ref(self):
@@ -2461,6 +2769,12 @@ class IbvsController:
     def control_step(self):
         self.update_state_machine()
         self.update_approach()
+        if self.raw_mode and self.height_source == HEIGHT_SIZE:
+            # size-growth speed for the fused filter, EVERY tick -- also before
+            # engagement, so speed and bias are already right at the switch
+            y, rate = self.size_height_measurement(rospy.Time.now())
+            self.size_v_valid = y is not None and rate is not None
+            self.size_v_vis = rate * self.size_distance_nominal if self.size_v_valid else 0.0
         thrust = self.compute_thrust()
         # what the motors are actually producing (first-order motor lag), for
         # the IMU + thrust contact estimate

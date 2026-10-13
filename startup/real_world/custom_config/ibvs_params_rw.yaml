@@ -441,28 +441,70 @@ pid_z_raw:
 # Holds the DISTANCE TO THE BRANCH from the detector's apparent size: size =
 # f*D/d, so holding ln(size) holds d without knowing the diameter D. Error =
 # ln(size_ref) - ln(size) ~ (d - d_ref)/d (0.1 = 10 % further away), captured
-# when GUIDED_NOGPS is selected. Topic ibvs/size_height (x held, y measured,
+# when GUIDED_NOGPS is selected, PROVISIONAL until ALIGNED: re-captured
+# there (off-centre the detector sees another, differently thick piece of the
+# branch; 11:41 settled 22 cm higher), integral learns only while ALIGNED. Topic ibvs/size_height (x held, y measured,
 # z error); ground truth ibvs/height y (OptiTrack, lab). 2026-10-13 climbs:
 # size gives distance to ~5 %/frame, 2.8 cm after 0.3 s, outliers 21-28 cm.
 pid_z_size:                   # [throttle per unit ln-error] = pid_z_raw x ~1.5 m
   kp: 0.05                    # 10 % too far -> +0.005 throttle
   ki: 0.015
-  kd: 0.06                    # on the expansion rate d ln(size)/dt = -vz/d
+  kd: 0.06                    # size_damping vision: on the expansion rate d ln(size)/dt
+  kd_vz: 0.04                 # size_damping imu: [throttle per m/s] on the IMU vertical
+                              # speed (= pid_z_raw kd on OptiTrack vz)
   i_max: 0.035                # [throttle] same trim authority as pid_z_raw
+size_damping: fused           # D from: fused = IMU speed pulled toward the size-growth
+                              # speed (fast from the IMU, slow from size) | vision =
+                              # size growth only (12:26: 1.6 s oscillation, +-0.45 m/s)
+                              # | imu = leaky IMU only (11:56: slow +-17 cm wander).
+                              # 12:26 replay: fused 0.05-0.06 m/s error, no lag
+size_fused_tau: 1.5           # [s] crossover: faster than this from the IMU
+size_distance_nominal: 1.6    # [m] size growth (1/s) -> m/s; only scales the slow part
+imu_vz_tau: 0.7               # [s] leak of the IMU speed integrator
+imu_bias_tau: 5.0             # [s] bias = mean vertical acceleration, ONLY while there
+                              # is no usable size (with size, fused learns it below)
+size_fused_bias_gain: 0.11    # [1/s^2] bias learned through the size growth, engaged
+size_fused_bias_gain_fast: 1.0  # [1/s^2] same while the pilot flies (WAIT_ARM): the
+                              # bias jumps at motor spin-up (12:34 E1: fused said
+                              # -0.55 m/s at a true -0.09 -> fence)
 size_rate_window_s: 0.5       # [s] least squares window for the expansion rate
 size_jump: 0.15               # max |ln| step vs the filtered value (~15 %); bigger
                               # = another piece of the branch, sample rejected
 size_timeout_s: 0.5           # [s] no accepted size this long -> hover throttle
                               # + trim, open loop (pilot ready)
+size_median: 3                # median of the last 3 sizes before the gate: removes
+                              # single-frame spikes (100-110 > 5 % per flight) for 1
+                              # frame (~40 ms) of delay. 1 = off
 size_filter_alpha: 0.4        # per-sample EMA on ln(size)
 size_slant_axis: u            # image axis ACROSS the branch: seen at an angle across
                               # it the branch looks wider by 1/cos -> corrected. 'u'
                               # = branch runs up-down in the image (heading aligned
                               # to the branch, as in the lab), 'v' = the other way,
                               # 'none' = off. 400 px off-centre = 8.6 % (12 cm at 1.5 m)
-size_fence_m: 0.3             # [m] LAB fence (needs USE_OPTITRACK=true): further
-                              # than this from the engagement height -> hold on
-                              # OptiTrack back at the engagement height. 0 = off
+# Engagement + plausibility (2026-10-13 14:33: all 3 engagements tripped the fence)
+size_engage_max_vz: 0.15      # [m/s] reference captured only while |vertical speed| is
+                              # below this; until then hover + trim + damping, log
+                              # "WAITING to capture the reference: moving ..."
+size_consistency_mps: 0.3     # [m/s] size-growth speed vs IMU speed mismatch that
+size_consistency_s: 0.4       # [s] lasts this long = size not trusted (another object /
+                              # detector switch): damping only, reference re-captured
+                              # once it agrees again
+size_ratio_max: 2.0           # after a detection gap, a size more than 2x off the recent
+size_typical_tau_s: 3.0       # typical size (EMA) is refused while that typical is less
+size_typical_keep_s: 10.0     # than 10 s old (14:33 E2: a 35-55 px object, branch ~9 px)
+size_align_ki_ratio: 0.5      # size integral learns at this fraction during ALIGN (slow
+                              # trim errors); full rate once ALIGNED
+# Size GAPS (detections lost / size distrusted): the IMU speed keeps the bias
+# learned from the size and leaks slowly, and the height is held INERTIALLY
+# (integrated IMU speed since the gap began). 15:20 E2 sank 0.5 m in 2.6 s
+# after the detections stopped; replay: integrated drop 0.41 m vs true 0.46.
+size_gap_tau: 20.0            # [s] leak of the IMU speed during a gap (was 1.5)
+size_gap_max_s: 10.0          # [s] longer gaps: bias no longer trusted, damping only
+size_gap_kp: 0.035            # [throttle per m] push back to the gap-start height
+size_fence_m: 0.5             # [m] LAB fence (needs USE_OPTITRACK=true): further
+                              # than this from the hold height (engagement height,
+                              # re-centred at ALIGNED) -> hold on OptiTrack back
+                              # there. 0 = off. 0.3 until 2026-10-13 14:50
 # Virtual level camera (scripts/virtual_camera.py) -- removes the image motion
 # caused by roll/pitch, in real time from the IMU (exact rotation, see that
 # file). It needs only what describes the HARDWARE: how the camera is mounted
