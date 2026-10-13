@@ -613,6 +613,11 @@ class IbvsController:
         # way (the force check sees it too, ~0.1 s later)
         self.push_slip_m = rospy.get_param('~push_slip_m', 0.05)
         self.push_slip_vz = rospy.get_param('~push_slip_vz', 0.25)
+        # true: contact detected (IMU + thrust) = perched -- push for
+        # push_ramp_s + activation_hold_s, then PERCHED; only rising above the
+        # contact point (or the force limit) aborts. false: the force estimate
+        # must confirm >= gripper_activation_force_n (and a lost force fails).
+        self.perch_on_contact = rospy.get_param('~perch_on_contact', True)
         self.perched_thrust_margin = rospy.get_param('~perched_thrust_margin', 0.01)
         # STRUCTURAL LIMIT: no contact force above this, ever. Half of it is
         # the most the push may command and the most the impact may reach
@@ -832,6 +837,7 @@ class IbvsController:
         ki_xy = rospy.get_param('~pid_xy/ki', 0.0)
         kd_xy = rospy.get_param('~pid_xy/kd', 0.0)
         i_max_xy = rospy.get_param('~pid_xy/i_max', 0.05)
+        self.xy_trim_keep = rospy.get_param('~pid_xy/keep_trim', False)
         # The D term differentiates the detection, so it amplifies pixel
         # jitter. This EMA smooths it (1.0 = no filtering).
         self.d_filter = rospy.get_param('~pid_xy/d_filter', 0.3)
@@ -1309,8 +1315,16 @@ class IbvsController:
             # position, still valid a moment later)
             if new_state == ALIGN and self.state not in (ALIGN, ALIGNED, CLIMBING,
                                                          STRIKE, PUSH, PERCHED):
-                self.pid_x.reset()
-                self.pid_y.reset()
+                # the integral is the X-Y TRIM the vehicle needs to stand
+                # still (a vehicle property, like the height trim): kept across
+                # engagements with xy_trim_keep, else re-learned from 0 each
+                # time (2026-10-12 18:05: 14 s to build 1.4 deg of pitch trim)
+                if self.xy_trim_keep:
+                    self.pid_x.zero_terms()
+                    self.pid_y.zero_terms()
+                else:
+                    self.pid_x.reset()
+                    self.pid_y.reset()
                 # drop the stale derivative too: the detection gap across a
                 # TAG_LOST would otherwise show up as a huge d(error)/dt
                 self.t_x_dot = 0.0
@@ -1675,7 +1689,7 @@ class IbvsController:
                                   self.push_force_target, self.activation_force_n,
                                   self.activation_hold_s))
             return
-        if st == PUSH:
+        if st in (PUSH, PERCHED):
             t_push = (now - self.push_started).to_sec()
             # what the commanded thrust should press with, filtered like the
             # estimate so the two are comparable during the ramp
@@ -1684,27 +1698,45 @@ class IbvsController:
             self.push_expected += (min(1.0, self.dt / self.contact_filter_s) *
                                    (model - self.push_expected))
             held = self.mean_contact_force(now, 0.15)
-            self.push_peak = max(self.push_peak, held)
-            # Lost the branch mid-push (bounced off / slid off / it gave way):
-            # the extra thrust is now accelerating us upward -- stop at once.
+            if st == PUSH:
+                self.push_peak = max(self.push_peak, held)
+            # The one dangerous case: free and RISING ABOVE the contact point
+            # (missed it / slid off / it gave way) -- the push thrust then
+            # accelerates us upward. Rising while still BELOW it is just the
+            # push bringing us back after bouncing down off the branch
+            # (2026-10-12 18:02 / 18:05: 4-6 cm down, then back up), which is
+            # harmless. Lab only (OptiTrack); vz only after 0.15 s: the impact
+            # is still braking us at first (0.23 m/s at PUSH in 10:32).
+            z = self.fresh_odom_height(now)
+            if z is not None and self.push_contact_z is not None:
+                vz = self.last_odom.twist.twist.linear.z
+                above = z - self.push_contact_z
+                if (above > self.push_slip_m or
+                        (t_push >= 0.15 and above > 0.02 and vz > self.push_slip_vz)):
+                    self.fail_approach("rising above the contact while pushing "
+                                       "(%.2f m above it, %.2f m/s) -- slid off or "
+                                       "the branch gave way" % (above, vz))
+                    return
+            if st == PERCHED:
+                return
+            if self.perch_on_contact:
+                # The hit IS the confirmation: the gripper triggers on impact
+                # (it activated on every perch so far). Push for the ramp plus
+                # the hold time, whatever the force estimate says, then PERCHED.
+                if t_push >= self.push_ramp_s + self.activation_hold_s:
+                    self.transition(PERCHED)
+                    self.set_approach(APP_PERCHED, "pushed %.1f N for %.1f s after "
+                                      "the hit -- perched on contact (force "
+                                      "estimate peak %.1f N)" % (
+                                          self.push_force_target, t_push,
+                                          self.push_peak))
+                return
+            # perch_on_contact false: the force estimate must confirm it
             if (t_push >= 0.25 and self.push_expected >= 1.0 and
                     held < 0.3 * self.push_expected):
                 self.fail_approach("contact lost %.2f s into the push (%.1f of "
                                    "%.1f N)" % (t_push, held, self.push_expected))
                 return
-            # lab: OptiTrack sees it ~0.1 s sooner (pressed on the branch vz
-            # stays within +-0.05 m/s; free, the push accelerates us upward).
-            # vz only after 0.15 s: the impact is still braking us at first
-            # (2026-10-12-10-32-06.bag: 0.23 m/s at PUSH, <= 0.05 from 0.15 s)
-            z = self.fresh_odom_height(now)
-            if z is not None and self.push_contact_z is not None:
-                vz = self.last_odom.twist.twist.linear.z
-                if (z > self.push_contact_z + self.push_slip_m or
-                        (t_push >= 0.15 and vz > self.push_slip_vz)):
-                    self.fail_approach("moving up while pushing (%.2f m above "
-                                       "the contact, %.2f m/s) -- slid off or the "
-                                       "branch gave way" % (z - self.push_contact_z, vz))
-                    return
             if held >= self.activation_force_n:
                 if self.activation_since is None:
                     self.activation_since = now
@@ -1722,8 +1754,6 @@ class IbvsController:
                                    "%.1f of %.1f N in %.1f s" % (
                                        self.push_peak, self.activation_force_n,
                                        self.push_timeout_s))
-            return
-        if st == PERCHED:
             return
         if st == STRIKE:
             if (now - self.strike_started).to_sec() >= self.strike_timeout_s:
@@ -1921,8 +1951,13 @@ class IbvsController:
         if self.contact_baseline is None:
             self.contact_baseline = self.contact_f_filt
         force = self.contact_f_filt - self.contact_baseline
-        if (self.state in (ALIGN, ALIGNED, TAG_LOST) and
-                abs(force) < 0.5 * self.contact_force_n):
+        # NO size gate: contact is only judged in CLIMBING / STRIKE, so while
+        # hovering everything the estimate shows is offset and is learned, in
+        # both directions. A gate let a baseline caught on the engagement
+        # transient stick for the whole flight: at -0.7 N with |force| < 0.3
+        # (2026-10-12-18-02-54, pushes read 0.7 N short), at +0.6 N with
+        # force < 0.3 (2026-10-13-10-19-27, false contact as the climb began)
+        if self.state in (ALIGN, ALIGNED, TAG_LOST):
             self.contact_baseline += (min(1.0, self.dt / self.contact_baseline_s) *
                                       (self.contact_f_filt - self.contact_baseline))
         impact = self.impact_peak

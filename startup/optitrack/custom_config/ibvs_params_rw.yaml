@@ -163,7 +163,8 @@ command_mode: attitude
 # standing error is genuine steady state). That eats 1.44 deg = 72% of a 2 deg
 # budget, leaving only ~0.10 m/s2 to actually manoeuvre with. Fine for a slow
 # direction-check; raise to 3-5 deg if it cannot make headway.
-max_tilt: 0.052               # [rad] desired-tilt clamp (3.0 deg; was 0.035 = 2 deg until 2026-10-02)
+max_tilt: 0.087               # [rad] desired-tilt clamp (5.0 deg; 2 deg until 2026-10-02, 3 deg until
+                              # 2026-10-13: a 1.9 deg trim (18:05) left only 1.1 deg to steer with)
 
 # RATE mode only (ignored when command_mode is 'attitude').
 kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
@@ -243,10 +244,14 @@ pid_xy:
                               # the VIRTUAL (tilt-compensated) error. OFF for this test (old note). This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
                               # with kd 0 expect overshoot on the way in.
-  i_max: 0.025                 # [rad] max integral contribution -- this is the
+  i_max: 0.045                 # [rad] (2.6 deg; was 0.025 = 1.43 deg, saturated on
+                              # 2026-10-12 18:05 at a ~1.9 deg pitch trim)
+                              # max integral contribution -- this is the
                               # trim authority: 0.05 rad of tilt cancels about
                               # g*0.05 = 0.49 m/s^2 of steady disturbance, and
                               # bounds how far the integrator can wind up
+  keep_trim: true             # keep the integral (= learned X-Y trim) across
+                              # engagements instead of re-learning it from 0
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.40              # [s] longest detection gap still differentiated;
                               # beyond it the D term is zeroed instead of
@@ -337,7 +342,7 @@ climb_integrate: true         # pid_z_raw integral also learns while CLIMBING /
 # NOTE for the floor branch: it was not detected below ~1.2 m
 # (2026-10-08-09-32-35.bag: 0 % at 0.8-1.2 m, 98 % at 1.4-1.6 m).
 approach_enabled: true
-approach_dwell_s: 5.0         # [s] continuously ALIGNED before the climb starts
+approach_dwell_s: 2.0         # [s] continuously ALIGNED before the climb starts (5.0 until 2026-10-13)
 approach_speed: 0.15          # [m/s] climb rate while CLIMBING (aligned). Was 0.05
                               # until 2026-10-11, 0.10 until 2026-10-12 (held
                               # <= 3 cm lateral). 0.15: TTC exact, size to contact
@@ -378,6 +383,10 @@ ttc_min_samples: 10
 vehicle_mass: 1.0             # [kg] for the contact force estimate
 contact_force_n: 0.6          # [N] sustained push: 0.2 s mean above this...
 contact_dwell_s: 0.2          # [s] ...for this long (free flight: <= 0.38 N)
+contact_baseline_s: 1.5       # [s] the contact-force zero is learned while hovering
+                              # (ALIGN/ALIGNED/TAG_LOST) with this time constant
+                              # (3.0 default; shorter now that the climb starts
+                              # 2 s after ALIGNED)
 impact_force_n: 1.2           # [N] impact: one raw IMU sample above this. Was 2.0
                               # until 2026-10-11: the real hit (0.25 m/s on the
                               # ArUco) peaked at exactly 2.0 N. Free flight raw:
@@ -397,6 +406,11 @@ push_timeout_s: 3.0           # [s] activation not reached by then -> FAILED
 push_slip_m: 0.10             # [m] OptiTrack this far above the contact height... (was 0.05: a flexible branch lifted 4.1 cm under 2.3 N, 2026-10-12-11-43-43)
 push_slip_vz: 0.25            # [m/s] ...or rising this fast = slid off (lab only;
                               # pressed on the branch vz stayed within +-0.05; the 4 cm lift peaked at 0.16)
+perch_on_contact: true        # contact detected = perched: push push_ramp_s +
+                              # activation_hold_s, then PERCHED; a bounce DOWN off
+                              # the branch no longer fails it (18:02/18:05 did),
+                              # only rising above the contact point does. false =
+                              # the force estimate must confirm the activation
 perched_thrust_margin: 0.01   # [throttle] light press while PERCHED (pilot takes over)
 # STRUCTURAL LIMIT: the controller never commands, and aborts on measuring,
 # more than this. Push target and predicted impact must each stay below half
@@ -470,7 +484,7 @@ align_tolerance_px: 70        # [px] target must be within this many pixels of
                               # Exits ALIGNED at 60 px via align_hysteresis.
 align_dwell_time: 1.5         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
-align_ref_rate_px_s: 70.0     # [px/s] image setpoint ramp: on entering ALIGN the
+align_ref_rate_px_s: 100.0    # [px/s] (70 until 2026-10-13) image setpoint ramp: on entering ALIGN the
                               # setpoint starts at the target and slides to the
                               # centre at this rate (never pulls back). 0 = step.
                               # 2026-10-12-17-44-31: 395-454 px starts ran at
