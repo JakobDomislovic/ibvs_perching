@@ -619,6 +619,33 @@ class IbvsController:
         self.size_damp_max_vz = rospy.get_param('~size_damp_max_vz', 0.4)
         self.size_gap_max_h = rospy.get_param('~size_gap_max_h', 0.5)
         self.size_jump_max = rospy.get_param('~size_jump_max', 1.5)
+        # TIME-TO-CONTACT CLIMB (height_source 'size', approach_enabled): no
+        # metres -- the size setpoint grows so that the time-to-contact
+        # (size / size growth) counts down from climb_tau0_s at 1 s per s:
+        # ln size_ref = ln size_0 - ln(1 - t/tau0), i.e. a CONSTANT approach
+        # speed (distance / tau0) and contact after tau0 s. Smooth start over
+        # climb_blend_s. Detection lost with less than climb_blind_tau_s to
+        # go -> STRIKE: blind, the climb throttle held and the speed kept on
+        # the IMU. No contact by tau0 + climb_timeout_extra_s -> FAILED: the
+        # size setpoint goes back to the climb start at climb_back_rate.
+        self.climb_tau0 = rospy.get_param('~climb_tau0_s', 8.0)
+        self.climb_blend_s = rospy.get_param('~climb_blend_s', 1.0)
+        self.climb_blind_tau_s = rospy.get_param('~climb_blind_tau_s', 3.0)
+        self.climb_timeout_extra_s = rospy.get_param('~climb_timeout_extra_s', 2.0)
+        self.climb_back_rate = rospy.get_param('~climb_back_rate', 0.1)
+        # contact is only believed once the branch is close: STRIKE, or the
+        # size >= this x the climb start (distance halved); before that the
+        # contact zero keeps learning (17:25: leaving ground effect read as
+        # 0.7 N pressing -> false contact at 0.49 m, size 1.13x)
+        self.climb_contact_size_ratio = rospy.get_param('~climb_contact_size_ratio', 2.0)
+        self.climb_t = 0.0            # countdown time (advances only while CLIMBING)
+        self.climb_y0 = None          # ln size at the climb start
+        self.size_climb_thr = None    # smoothed throttle while CLIMBING (STRIKE base)
+        self.size_strike_dv = 0.0     # IMU speed change since STRIKE began [m/s]
+        self.size_strike_limit = None # blind STRIKE time limit [s]
+        self.size_blind_since = None  # blind climb (STRIKE / short gap) began
+        self.size_fail_clip = False   # FAILED: start the way back at the measured size
+        self.imu_az_corr = 0.0        # last bias-corrected vertical acceleration
         self.size_gap_h = 0.0         # integrated height change in the gap [m]
         self.size_gap_t0 = None       # gap start (control time)
         self.size_had_ref = False     # a reference existed this engagement
@@ -973,17 +1000,22 @@ class IbvsController:
                 "AND a height source: use_optitrack or height_source 'size' "
                 "(got mission_mode '%s', use_optitrack %s, height_source '%s')"
                 % (self.mission_mode, self.use_optitrack, self.height_source))
-        if size_height and self.approach_enabled:
+        if size_height and self.approach_enabled and not (
+                self.climb_tau0 > self.climb_blend_s + 1.0 and
+                0.0 < self.climb_blind_tau_s < self.climb_tau0 and
+                self.climb_contact_size_ratio > 1.0):
             raise rospy.ROSInitException(
-                "ibvs_controller: height_source 'size' is a HOLD only for now "
-                "-- set approach_enabled: false (the climb in size space is "
-                "not implemented yet)")
+                "ibvs_controller: need climb_tau0_s > climb_blend_s + 1 and "
+                "0 < climb_blind_tau_s < climb_tau0_s and "
+                "climb_contact_size_ratio > 1")
         if size_height:
             rospy.loginfo("ibvs_controller: HEIGHT FROM SIZE -- holds the distance "
                           "to the branch from the detector's size%s",
-                          (" (OptiTrack = ground truth + %.2f m fence)" %
-                           self.size_fence_m) if self.use_optitrack and
-                          self.size_fence_m > 0.0 else " (no OptiTrack)")
+                          (" (OptiTrack = ground truth + %.2f m fence, max_height "
+                           "ceiling, push slip check)" % self.size_fence_m)
+                          if self.use_optitrack and self.size_fence_m > 0.0 else
+                          " (no OptiTrack in the loop: no fence, no ceiling, no "
+                          "push slip check)")
         # Thrust that means "no vertical correction" in the active mode.
         self.neutral_thrust = (self.raw_hover_throttle if self.raw_mode
                                else self.hover_thrust)
@@ -1045,6 +1077,18 @@ class IbvsController:
         self.align_tolerance_px = rospy.get_param('~align_tolerance_px', 40.0)
         self.align_dwell_time = rospy.get_param('~align_dwell_time', 2.0)
         self.align_hysteresis = rospy.get_param('~align_hysteresis', 1.5)
+        # BRANCH: only the error ACROSS the branch counts for ALIGN/ALIGNED
+        # ('u' or 'v' = image axis across it; 'none' = distance from the aim
+        # point, as before). Along the branch any point can be gripped: only
+        # align_along_tolerance_px (x align_hysteresis to leave) keeps the
+        # point in the picture. 16:59: 14 px across, 106 px along (8 cm along
+        # the branch, more pixels the closer) paused the climb for 4.8 s.
+        self.align_across_axis = rospy.get_param('~align_across_axis', 'none')
+        self.align_along_tolerance_px = rospy.get_param('~align_along_tolerance_px', 170.0)
+        if self.align_across_axis not in ('none', 'u', 'v'):
+            raise rospy.ROSInitException(
+                "ibvs_controller: align_across_axis must be 'none', 'u' or 'v', "
+                "got %r" % self.align_across_axis)
         self.tag_timeout = rospy.get_param('~tag_timeout', 1.0)
         # IMAGE SETPOINT RAMP: on entering ALIGN the setpoint starts where the
         # target IS and slides to the aim point at this many px/s, so a large
@@ -1640,6 +1684,20 @@ class IbvsController:
         dy = self.err_px[1] - self.aim_px_y
         return math.hypot(dx, dy)
 
+    def align_errors_px(self):
+        """(error that counts for ALIGN/ALIGNED, error along the branch) in
+        real pixels: (|across|, |along|) with align_across_axis 'u' / 'v',
+        (distance from the aim point, 0) with 'none'. None without a detection."""
+        if self.err_px is None:
+            return None, None
+        dx = self.err_px[0] - self.aim_px_x
+        dy = self.err_px[1] - self.aim_px_y
+        if self.align_across_axis == 'u':
+            return abs(dx), abs(dy)
+        if self.align_across_axis == 'v':
+            return abs(dy), abs(dx)
+        return math.hypot(dx, dy), 0.0
+
     def compute_thrust(self):
         """Climb-rate command via the thrust field (0.5 = zero climb rate)."""
         # only compute_height_hold_thrust fills these in; zero them for every
@@ -1746,6 +1804,9 @@ class IbvsController:
             self.size_gap_h = 0.0
             self.size_gap_t0 = None
             self.size_ref_shifts.clear()
+            self.climb_y0 = None
+            self.climb_t = 0.0
+            self.size_blind_since = None
             self.size_engage_z = None
             self.size_fence_tripped = False
             self.approach_aligned_since = None
@@ -1760,14 +1821,14 @@ class IbvsController:
                 self.set_approach(APP_IDLE, "not engaged")
             return self.raw_hover_throttle
 
-        if self.height_source == HEIGHT_SIZE and not self.size_fence_tripped:
+        odom = self.last_odom
+        age = (None if odom is None else
+               (rospy.Time.now() - self.last_odom_time).to_sec())
+        if self.state not in (PUSH, PERCHED) and self.size_height_active():
             thrust = self.compute_size_height_thrust(rospy.Time.now())
             if thrust is not None:
                 return thrust
             # fence tripped: fall through to the OptiTrack hold below
-        odom = self.last_odom
-        age = (None if odom is None else
-               (rospy.Time.now() - self.last_odom_time).to_sec())
         if self.state in (PUSH, PERCHED):
             # Direct throttle, no height loop: we are pressed against the
             # branch. Keep z_ref at the current height so a FAILED push holds
@@ -1867,7 +1928,8 @@ class IbvsController:
         # always, also while not engaged: lets the time-to-contact be checked
         # by hand (props off) before it is ever flown
         self.publish_closeness(now)
-        if self.state == WAIT_ARM or self.z_ref is None:
+        if self.state == WAIT_ARM or (self.z_ref is None and
+                                      not self.size_height_active()):
             return
         contact = self.update_contact(now)
         st = self.state
@@ -1890,9 +1952,12 @@ class IbvsController:
             self.push_contact_z = self.fresh_odom_height(now)
             self.snap_at = None
             self.snap_logged = False
-            self.set_approach(APP_PUSH, "contact (%s) at %.2f m -> pushing %.1f N "
+            at = (self.push_contact_z if self.push_contact_z is not None
+                  else self.z_ref)
+            self.set_approach(APP_PUSH, "contact (%s)%s -> pushing %.1f N "
                               "(gripper needs %.1f N for %.1f s)" % (
-                                  self.contact_reason, self.z_ref,
+                                  self.contact_reason,
+                                  "" if at is None else " at %.2f m" % at,
                                   self.push_force_target, self.activation_force_n,
                                   self.activation_hold_s))
             return
@@ -1915,7 +1980,8 @@ class IbvsController:
             # harmless. Lab only (OptiTrack); vz only after 0.15 s: the impact
             # is still braking us at first (0.23 m/s at PUSH in 10:32).
             z = self.fresh_odom_height(now)
-            if z is not None and self.push_contact_z is not None:
+            if (z is not None and self.push_contact_z is not None and
+                    self.optitrack_safety()):
                 vz = self.last_odom.twist.twist.linear.z
                 above = z - self.push_contact_z
                 if (above > self.push_slip_m or
@@ -1963,11 +2029,16 @@ class IbvsController:
                                        self.push_timeout_s))
             return
         if st == STRIKE:
-            if (now - self.strike_started).to_sec() >= self.strike_timeout_s:
-                self.fail_approach("no contact within %.1f s of STRIKE" %
-                                   self.strike_timeout_s)
+            limit = self.strike_timeout_s
+            if self.size_height_active() and self.size_strike_limit is not None:
+                limit = self.size_strike_limit     # blind: contact was due
+            if (now - self.strike_started).to_sec() >= limit:
+                self.fail_approach("no contact within %.1f s of STRIKE" % limit)
             return
 
+        if self.size_height_active():
+            self.update_size_approach(now, st)
+            return
         if self.approach == APP_WAITING:
             at_hover = abs(self.z_ref - self.hold_height) < 1e-6
             if st == ALIGNED and at_hover:
@@ -2004,6 +2075,58 @@ class IbvsController:
                                   "max %.2f m" % (why, self.strike_speed,
                                                   self.max_height))
 
+    def update_size_approach(self, now, st):
+        """Approach on the size height: WAITING (hold) -> CLIMBING (time-to-
+        contact countdown, see climb_tau0) -> STRIKE (blind, only when the
+        detection is lost close to the branch) -> contact -> PUSH (shared)."""
+        if self.approach == APP_WAITING:
+            if st == ALIGNED and self.size_ref_final and self.y_ref is not None:
+                if self.approach_aligned_since is None:
+                    self.approach_aligned_since = now
+                elif ((now - self.approach_aligned_since).to_sec() >=
+                      self.approach_dwell_s):
+                    self.climb_t = 0.0
+                    self.climb_y0 = self.y_ref
+                    self.size_climb_thr = None
+                    self.size_blind_since = None
+                    self.start_climbing(now, "ALIGNED %.1f s -> climbing: time to "
+                                        "contact counts down from %.1f s" % (
+                                            self.approach_dwell_s, self.climb_tau0))
+            else:
+                self.approach_aligned_since = None
+        elif self.approach == APP_PAUSED:
+            if st == ALIGNED:
+                self.start_climbing(now, "ALIGNED again -- countdown resumes, "
+                                    "%.1f s to contact" % (self.climb_tau0 - self.climb_t))
+        elif self.approach == APP_CLIMBING:
+            remaining = self.climb_tau0 - self.climb_t
+            # a REAL loss only (16:41: the size/IMU consistency flag started
+            # a false STRIKE 0.8 m below the branch with the detection fine)
+            no_size = (self.y_last_accept is None or
+                       (now - self.y_last_accept).to_sec() > 0.2)
+            if (st != CLIMBING or no_size) and remaining <= self.climb_blind_tau_s:
+                # close to the branch the detector loses it (no size, or the
+                # point swings out of the aligned zone): finish blind
+                self.strike_trim = self.current_trim(now)
+                self.transition(STRIKE)
+                self.strike_started = now
+                self.strike_start_height = self.fresh_odom_height(now)
+                # contact due in `remaining` s: climb_timeout_extra_s of
+                # slack (as for the countdown), then FAILED
+                self.size_strike_limit = max(0.5, remaining +
+                                             self.climb_timeout_extra_s)
+                self.set_approach(APP_STRIKE, "branch lost (%s) %.1f s before "
+                                  "contact -> blind: climb throttle held, speed "
+                                  "kept on the IMU" % (
+                                      "no size" if st == CLIMBING else st,
+                                      remaining))
+            elif st != CLIMBING:
+                self.set_approach(APP_PAUSED, "%s -- countdown paused, %.1f s to "
+                                  "contact" % (st, remaining))
+            elif self.climb_t >= self.climb_tau0 + self.climb_timeout_extra_s:
+                self.fail_approach("no contact %.1f s after the countdown ended" %
+                                   self.climb_timeout_extra_s)
+
     def current_trim(self, now):
         """Tilt (roll, pitch) that held the vehicle in place: the mean
         commanded tilt over the last trim_window_s of servoing (P's steady
@@ -2030,8 +2153,15 @@ class IbvsController:
             self.z_ref = self.last_odom.pose.pose.position.z
         self.fail_height = (self.strike_start_height
                             if self.strike_start_height is not None else self.z_ref)
-        self.set_approach(APP_FAILED, "%s -- going back to %.2f m" %
-                          (why, self.fail_height))
+        if self.size_height_active():
+            self.size_fail_clip = True
+            self.set_approach(APP_FAILED, "%s -- size setpoint back to the "
+                              "climb start" % why)
+        elif self.fail_height is None:
+            self.set_approach(APP_FAILED, "%s -- holding" % why)
+        else:
+            self.set_approach(APP_FAILED, "%s -- going back to %.2f m" %
+                              (why, self.fail_height))
         self.transition(ALIGN)
 
     def strike_ready(self, now):
@@ -2116,6 +2246,11 @@ class IbvsController:
         pid = self.height_pid()
         return self.raw_hover_throttle + pid.ki * pid.integral
 
+    def size_height_active(self):
+        """Raw thrust on the size height (not handed to OptiTrack by the fence)."""
+        return (self.raw_mode and self.height_source == HEIGHT_SIZE and
+                not self.size_fence_tripped)
+
     def height_pid(self):
         """The raw-mode height PID in charge (its integral = the hover trim)."""
         if self.height_source == HEIGHT_SIZE and not self.size_fence_tripped:
@@ -2140,12 +2275,17 @@ class IbvsController:
             return
         if self.imu_az_bias is None:
             self.imu_az_bias = az
+        self.imu_az_corr = az - self.imu_az_bias
         if self.size_damping == 'fused' and self.size_v_valid:
             # 2-state complementary filter: integrate the IMU, pull the speed
             # toward the size-growth speed (k1) and correct the bias with the
             # same mismatch (k2) -- the size growth fixes both slow errors
             innov = self.size_v_vis - self.imu_vz
-            if abs(innov) > self.size_consistency_mps:
+            # not while CLIMBING: the IMU offset moves ~0.1 m/s2 once climbing
+            # and the size speed lags, they disagree with both right (16:41);
+            # median + jump gate still catch a detector switch
+            if (abs(innov) > self.size_consistency_mps and
+                    self.approach != APP_CLIMBING):
                 # size disagrees with the IMU: do not let it pull (IMU only,
                 # with a leak), and after size_consistency_s distrust it
                 self.size_incons_time += dt
@@ -2213,14 +2353,22 @@ class IbvsController:
             self.y_window.clear()      # no median across a detection gap
         self.y_window.append(math.log(size))
         y = sorted(self.y_window)[len(self.y_window) // 2]
+        # While CLIMBING a GROWING size is real (we approach the branch): the
+        # gate, the level-jump shift and the typical-size check only judge a
+        # shrinking one. 17:23: a 20 % catch-up step was rejected for 0.5 s,
+        # then taken as a level jump -> setpoint +36 % -> 0.59 m/s; near the
+        # branch the real growth was rejected -> blind 0.3 m early.
+        growing = self.approach == APP_CLIMBING
         typical_fresh = (self.y_typical is not None and
                          (now - self.y_typical_t).to_sec() <= self.size_typical_keep_s)
         if ((stale or self.y_filt is None) and typical_fresh and
-                abs(y - self.y_typical) > math.log(self.size_ratio_max)):
+                abs(y - self.y_typical) > math.log(self.size_ratio_max) and
+                not (growing and y > self.y_typical)):
             self.y_rejected += 1       # far off the recent branch size: another object
             return
         if stale or self.y_filt is None:
-            if stale and no_gap and y_before is not None:
+            if (stale and no_gap and y_before is not None and
+                    not (growing and y > y_before)):
                 # detections kept coming but were all rejected: a level jump
                 if (abs(y - y_before) > math.log(self.size_jump_max) and
                         (now - self.y_last_accept).to_sec() <= self.size_typical_keep_s):
@@ -2228,7 +2376,7 @@ class IbvsController:
                     return
                 self.size_ref_shifts.append(y - y_before)
             self.y_filt = y
-        elif abs(y - self.y_filt) <= self.size_jump:
+        elif abs(y - self.y_filt) <= self.size_jump or (growing and y > self.y_filt):
             self.y_filt += self.size_filter_alpha * (y - self.y_filt)
         else:
             self.y_rejected += 1          # a jump: another piece of the branch
@@ -2275,7 +2423,19 @@ class IbvsController:
         z = self.fresh_odom_height(now) if self.use_optitrack else None
         if self.size_engage_z is None and z is not None:
             self.size_engage_z = z
-        if (z is not None and self.size_engage_z is not None and
+        climbing = self.approach in (APP_CLIMBING, APP_PAUSED, APP_STRIKE)
+        if (z is not None and climbing and z > self.max_height and
+                self.optitrack_safety()):
+            # LAB ceiling while the climb is under way (the hold fence is off:
+            # the climb is meant to go 1+ m up)
+            self.size_fence_tripped = True
+            self.z_ref = z
+            rospy.logerr("ibvs_controller: SIZE CLIMB above max_height %.2f m "
+                         "(OptiTrack %.2f m) -- OptiTrack takes over",
+                         self.max_height, z)
+            self.fail_approach("above max_height %.2f m" % self.max_height)
+            return None
+        if (z is not None and self.size_engage_z is not None and not climbing and
                 self.size_fence_m > 0.0 and
                 abs(z - self.size_engage_z) > self.size_fence_m):
             self.size_fence_tripped = True
@@ -2286,7 +2446,12 @@ class IbvsController:
                          "OptiTrack, back to %.2f m, for this engagement",
                          self.size_fence_m, z, self.size_engage_z,
                          self.size_engage_z)
+            if self.approach_enabled and self.approach not in (APP_IDLE, APP_OFF):
+                self.set_approach(APP_FAILED, "size hold fence -- no climbing "
+                                  "this engagement")
             return None
+        if self.state == STRIKE:
+            return self.size_blind_thrust(now, "STRIKE")
         y, rate = self.size_height_measurement(now)
         error_dot = (-(rate or 0.0) if self.size_damping == 'vision' else
                      -clamp(self.imu_vz, -self.size_damp_max_vz, self.size_damp_max_vz))
@@ -2295,8 +2460,9 @@ class IbvsController:
             # switch): ignore it, and re-capture the reference when it agrees
             # again (immediately final if still ALIGNED)
             y = None
-            self.y_ref = None
-            self.size_ref_final = False
+            if not climbing and self.approach != APP_FAILED:
+                self.y_ref = None
+                self.size_ref_final = False
             why = "size inconsistent with the IMU"
         else:
             why = "no fresh size"
@@ -2305,6 +2471,12 @@ class IbvsController:
             # (12:34 E2: engaged climbing 0.4 m/s with no detections, flew on
             # open loop with no damping into the fence), and once the hold had
             # a reference, hold the height INERTIALLY through the gap
+            if self.state == CLIMBING and self.climb_y0 is not None:
+                # mid-climb (longer than tag_timeout -> TAG_LOST -> PAUSED,
+                # held): keep counting down and climbing at the throttle and
+                # speed it had -- braking to a hold here stalled the 16:41 climb
+                self.advance_countdown()
+                return self.size_blind_thrust(now, "%s mid-climb" % why)
             if self.size_had_ref:
                 if self.size_gap_t0 is None:
                     self.size_gap_t0 = now
@@ -2315,6 +2487,7 @@ class IbvsController:
             return self.size_damping_only(pid, error_dot, why)
         self.size_gap_t0 = None
         self.size_gap_h = 0.0
+        self.size_blind_since = None
         if self.y_ref is None:
             # E: capture the reference only while about still
             v = (self.imu_vz if self.size_damping != 'vision'
@@ -2326,6 +2499,8 @@ class IbvsController:
             self.y_ref = y
             self.size_had_ref = True
             self.size_ref_shifts.clear()   # only jumps AFTER the capture count
+            if self.approach_enabled and self.approach == APP_IDLE:
+                self.set_approach(APP_WAITING, "size hold engaged")
             rospy.loginfo("ibvs_controller: size height hold engaged: holding "
                           "size %.1f px%s (provisional until ALIGNED)", math.exp(y),
                           (" (OptiTrack %.2f m)" % z) if z is not None else "")
@@ -2338,6 +2513,8 @@ class IbvsController:
             shift = self.size_ref_shifts.popleft()
             if self.y_ref is not None:
                 self.y_ref += shift
+                if self.climb_y0 is not None:
+                    self.climb_y0 += shift     # the countdown is built on it
                 rospy.logwarn("ibvs_controller: size LEVEL JUMP %+.0f %% (detector "
                               "on another piece of the branch) -- reference "
                               "shifted with it, height kept", 100.0 * (math.exp(shift) - 1))
@@ -2359,9 +2536,68 @@ class IbvsController:
             weight = self.size_align_ki_ratio
         else:
             weight = 0.0
+        if self.state == CLIMBING and self.climb_y0 is not None:
+            v_exp = self.advance_countdown()
+            if self.size_damping != 'vision':
+                error_dot = clamp(v_exp - self.imu_vz,
+                                  -self.size_damp_max_vz, self.size_damp_max_vz)
+            weight = 1.0
+        elif self.approach == APP_FAILED and self.climb_y0 is not None:
+            # back toward the climb start, gently, from the size actually
+            # measured (the countdown setpoint can be far above it)
+            if self.size_fail_clip:
+                self.size_fail_clip = False
+                self.y_ref = min(self.y_ref, y)
+            step = self.climb_back_rate * self.dt
+            if self.y_ref > self.climb_y0 + step:
+                self.y_ref -= step
+            weight = 0.0
         error = self.y_ref - y
+        if self.climb_y0 is not None:
+            # ln(size) error ~ distance error / d: the same gains get 2-3x
+            # stiffer near the branch (16:59: 0.39 -> 0.03 -> 0.42 m/s swings,
+            # 3.7 N hit). x d/d0 = size0/size -> constant stiffness in metres
+            error *= clamp(math.exp(-(y - self.climb_y0)), 0.05, 2.0)
         delta = pid.update(error, error_dot, self.dt, integrate=weight)
-        return self.raw_hover_throttle + delta
+        thrust = self.raw_hover_throttle + delta
+        if self.state == CLIMBING:
+            k = min(1.0, self.dt / 0.5)
+            self.size_climb_thr = (thrust if self.size_climb_thr is None else
+                                   self.size_climb_thr + k * (thrust - self.size_climb_thr))
+        return thrust
+
+    def advance_countdown(self):
+        """TIME-TO-CONTACT COUNTDOWN, one control step: ln size_ref = ln size_0
+        - ln(1 - t/tau0) (blended start). Returns the expected speed in the
+        fused filter's units: d_nom * size_0/size_ref * d(ln size_ref)/dt =
+        d_nom / tau0."""
+        self.climb_t += self.dt
+        tb = self.climb_blend_s
+        t = self.climb_t
+        t_eff = t * t / (2.0 * tb) if t < tb else t - 0.5 * tb
+        t_eff = min(t_eff, self.climb_tau0 - 0.2)
+        self.y_ref = self.climb_y0 - math.log(1.0 - t_eff / self.climb_tau0)
+        ramp = min(1.0, t / tb) if tb > 0.0 else 1.0
+        return ramp * self.size_distance_nominal / self.climb_tau0
+
+    def size_blind_thrust(self, now, why):
+        """Blind climb on the size height (STRIKE, or a short size gap while
+        CLIMBING): the smoothed climb throttle from just before, corrected so
+        the speed stays what it was (IMU speed change since going blind, bias
+        from the size). Contact, or the size coming back, ends it."""
+        if self.size_blind_since is None:
+            self.size_blind_since = now
+            self.size_strike_dv = 0.0
+        self.size_strike_dv += self.imu_az_corr * self.dt
+        base = (self.size_climb_thr if self.size_climb_thr is not None
+                else self.hover_throttle_est())
+        dv = clamp(self.size_strike_dv, -self.size_damp_max_vz, self.size_damp_max_vz)
+        rospy.logwarn_throttle(1.0, "ibvs_controller: SIZE BLIND (%s) -- speed "
+                               "change %+.2f m/s in %.1f s blind" % (
+                                   why, dv, (now - self.size_blind_since).to_sec()))
+        return clamp(base - self.pid_z_size.kd * dv,
+                     self.raw_hover_throttle - self.raw_thrust_margin,
+                     self.raw_hover_throttle + self.raw_thrust_margin)
 
     def size_damping_only(self, pid, error_dot, why, gap_h=None):
         """Size hold without a usable size: hover throttle + learned trim +
@@ -2391,6 +2627,12 @@ class IbvsController:
         ramp = 1.0 if self.push_ramp_s <= 0.0 else min(1.0, t / self.push_ramp_s)
         return min(self.push_force_target * ramp, 0.5 * self.max_contact_force_n)
 
+    def optitrack_safety(self):
+        """OptiTrack safety nets on the size height (hold fence, max_height
+        ceiling while climbing, push slip check): off with size_fence_m 0 --
+        flown as outdoors, OptiTrack only logged. Other height sources: on."""
+        return not (self.size_height_active() and self.size_fence_m <= 0.0)
+
     def fresh_odom_height(self, now):
         """OptiTrack height [m], or None if there is none or it is stale."""
         if (self.last_odom is None or
@@ -2410,9 +2652,11 @@ class IbvsController:
         the IMU's upward specific force. In free flight the thrust explains
         what the IMU feels and this is ~0; a branch pushing down on the
         vehicle (impact, or pressing against it) makes it positive. The
-        baseline absorbs the IMU scale / hover-trim bias; it is learned only
-        while hovering (ALIGN / ALIGNED / TAG_LOST) and FROZEN while CLIMBING
-        and STRIKE, so a slowly building push cannot be learned away.
+        baseline absorbs the IMU scale / hover-trim bias; it is learned while
+        hovering (ALIGN / ALIGNED / TAG_LOST) and, on the size climb, until
+        contact becomes plausible (contact_plausible), then FROZEN for the
+        rest of CLIMBING and STRIKE, so a slowly building push cannot be
+        learned away.
         Contact (checked in CLIMBING and STRIKE):
           impact     one raw IMU sample > impact_force_n
           sustained  filtered force > contact_force_n for contact_dwell_s
@@ -2433,7 +2677,8 @@ class IbvsController:
         # transient stick for the whole flight: at -0.7 N with |force| < 0.3
         # (2026-10-12-18-02-54, pushes read 0.7 N short), at +0.6 N with
         # force < 0.3 (2026-10-13-10-19-27, false contact as the climb began)
-        if self.state in (ALIGN, ALIGNED, TAG_LOST):
+        plausible = self.contact_plausible()
+        if self.state in (ALIGN, ALIGNED, TAG_LOST) or not plausible:
             self.contact_baseline += (min(1.0, self.dt / self.contact_baseline_s) *
                                       (self.contact_f_filt - self.contact_baseline))
         impact = self.impact_peak
@@ -2450,7 +2695,7 @@ class IbvsController:
 
         if max(force, impact) > self.max_contact_force_n:
             self.contact_overload = max(force, impact)
-        if self.state not in (CLIMBING, STRIKE):
+        if self.state not in (CLIMBING, STRIKE) or not plausible:
             self.contact_since = None
             return False
         if impact > self.impact_force_n:
@@ -2466,6 +2711,17 @@ class IbvsController:
         else:
             self.contact_since = None
         return False
+
+    def contact_plausible(self):
+        """False only early in the size climb: the branch is not close yet
+        (size < climb_contact_size_ratio x the climb start). STRIKE and every
+        other mode: True."""
+        if (self.state != CLIMBING or self.climb_y0 is None or
+                not self.size_height_active()):
+            return True
+        y = self.y_filt
+        return (y is not None and
+                y - self.climb_y0 >= math.log(self.climb_contact_size_ratio))
 
     def monitor_gripper(self, desired_roll, desired_pitch):
         """OBSERVE ONLY: flag a possible gripper snap (see snap_gyro_dps) on
@@ -2641,17 +2897,19 @@ class IbvsController:
             # recovers the true (possibly non-square) pixel distance, so the
             # threshold means "within N px of the aim point" whatever the
             # resolution.
-            error_norm_px = self.lateral_error_px()
+            error_norm_px, along_px = self.align_errors_px()
 
             if self.state == ALIGN:
-                if error_norm_px < self.align_tolerance_px:
+                if (error_norm_px < self.align_tolerance_px and
+                        along_px < self.align_along_tolerance_px):
                     if self.aligned_since is None:
                         self.aligned_since = rospy.Time.now()
                     elif (rospy.Time.now() - self.aligned_since).to_sec() >= self.align_dwell_time:
                         self.transition(ALIGNED)
                 else:
                     self.aligned_since = None
-            elif error_norm_px > self.align_tolerance_px * self.align_hysteresis:
+            elif (error_norm_px > self.align_tolerance_px * self.align_hysteresis or
+                  along_px > self.align_along_tolerance_px * self.align_hysteresis):
                 self.transition(ALIGN)
 
             # Axis pairing (this camera is mounted rotated 90 deg from the
@@ -2774,7 +3032,13 @@ class IbvsController:
             # engagement, so speed and bias are already right at the switch
             y, rate = self.size_height_measurement(rospy.Time.now())
             self.size_v_valid = y is not None and rate is not None
-            self.size_v_vis = rate * self.size_distance_nominal if self.size_v_valid else 0.0
+            # d = d_nom * size_0 / size: during a climb the distance shrinks,
+            # and the size growth rate (speed / d) with it -- keep the speed
+            # in metres per second of the climb start
+            d = self.size_distance_nominal
+            if self.size_v_valid and self.climb_y0 is not None:
+                d *= clamp(math.exp(-(y - self.climb_y0)), 0.05, 2.0)
+            self.size_v_vis = rate * d if self.size_v_valid else 0.0
         thrust = self.compute_thrust()
         # what the motors are actually producing (first-order motor lag), for
         # the IMU + thrust contact estimate

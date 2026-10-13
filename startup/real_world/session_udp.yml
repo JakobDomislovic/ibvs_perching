@@ -61,19 +61,19 @@ windows:
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/state
         # approach test status: IDLE / WAITING / CLIMBING / PAUSED / CEILING
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/approach
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
+        #- waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point
         # same detection as a LEVEL camera would see it (virtual_camera.py);
         # the controller uses it only with COMPENSATE=true
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point_virtual
+        #- waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/target_point_virtual
         - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/error
         # commanded attitude: x=roll y=pitch z=yaw [rad] (ibvs/pid_roll and
         # ibvs/pid_pitch carry the P/I/D split; plot those rather than echo)
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/control_angles
+        #- waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/control_angles
         - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/setpoint_raw/attitude
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/thrust
+        #- waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/thrust
         # height from size: x = ln size held, y = measured, z = x - y (~ dd/d)
-        - waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/size_height
+        #- waitForRos; rostopic echo /$UAV_NAMESPACE/ibvs/size_height
+        - waitForRos; rostopic echo /$UAV_NAMESPACE/mavros/state
   - reboot:
       layout: tiled
       panes:
