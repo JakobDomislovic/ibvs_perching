@@ -324,6 +324,15 @@ CMD_RATE = 'rate'
 THRUST_CLIMB_RATE = 'climb_rate'
 THRUST_RAW = 'raw'
 GUID_OPTIONS_FOR = {THRUST_CLIMB_RATE: 0, THRUST_RAW: 8}
+# Height source for thrust_mode 'raw' (~height_source):
+#   optitrack  height PID on OptiTrack z (startup/optitrack)
+#   size       hold the DISTANCE TO THE BRANCH from the detector's apparent
+#              size: size = f*D/d, so ln(size) = const - ln(d) -- holding it
+#              holds d without knowing the branch diameter D. No OptiTrack,
+#              baro or GPS in the loop (startup/real_world). See
+#              compute_size_height_thrust.
+HEIGHT_OPTITRACK = 'optitrack'
+HEIGHT_SIZE = 'size'
 
 # APPROACH TEST status (thrust_mode 'raw' only, ~approach_enabled), published
 # latched on ibvs/approach:
@@ -540,6 +549,47 @@ class IbvsController:
         # current height on the next engagement)
         self.z_ref = None
         self.raw_mode = self.thrust_mode == THRUST_RAW
+        # HEIGHT FROM SIZE (height_source 'size', raw mode): the error is
+        # ln(size_ref) - ln(size) ~ (d - d_ref)/d, dimensionless; the gains are
+        # pid_z_raw's x ~1.5 m (kp 0.035 thr/m -> 0.05 thr per unit). D comes
+        # from the expansion rate d ln(size)/dt (= -vz/d), least squares over
+        # size_rate_window_s. 2026-10-13 climbs vs OptiTrack: size measures
+        # distance to ~5 % per frame, 2.8 cm after 0.3 s, outliers 21-28 cm
+        # (gated by size_jump).
+        self.height_source = rospy.get_param('~height_source', HEIGHT_OPTITRACK)
+        self.pid_z_size = Pid(rospy.get_param('~pid_z_size/kp', 0.05),
+                              rospy.get_param('~pid_z_size/ki', 0.015),
+                              rospy.get_param('~pid_z_size/kd', 0.06),
+                              -self.raw_thrust_margin, self.raw_thrust_margin,
+                              rospy.get_param('~pid_z_size/i_max', 0.035))
+        self.size_rate_window_s = rospy.get_param('~size_rate_window_s', 0.5)
+        self.size_jump = rospy.get_param('~size_jump', 0.15)       # max |d ln| accepted
+        self.size_timeout_s = rospy.get_param('~size_timeout_s', 0.5)
+        self.size_filter_alpha = rospy.get_param('~size_filter_alpha', 0.4)
+        # Off-centre correction. The branch is a long cylinder about parallel
+        # to the image: ALONG it the image width is constant, but seen at an
+        # angle theta ACROSS it, it looks WIDER: width = f*D / (d * cos theta).
+        # Corrected size = width * cos(theta), theta from the pixel offset on
+        # the image axis across the branch (size_slant_axis) and camera/fx.
+        # 'u': branch runs up-down in the image (heading aligned to the
+        # branch, as in the lab); 'v': the other way; 'none': off.
+        self.size_fx = rospy.get_param('~camera/fx', 0.0)
+        self.size_slant_axis = rospy.get_param('~size_slant_axis', 'none')
+        if self.size_slant_axis not in ('u', 'v', 'none'):
+            raise rospy.ROSInitException(
+                "ibvs_controller: size_slant_axis must be 'u', 'v' or 'none'")
+        # LAB ONLY: with use_optitrack, OptiTrack is ground truth and a fence:
+        # if the size hold drifts more than this from the engagement height,
+        # hold on OptiTrack (back to the engagement height) for the rest of
+        # the engagement. 0 = no fence. Never used for control otherwise.
+        self.size_fence_m = rospy.get_param('~size_fence_m', 0.3)
+        self.y_hist = collections.deque(maxlen=200)   # (t, ln size) accepted
+        self.y_filt = None          # filtered ln(size), detection thread
+        self.y_last_accept = None
+        self.y_rejected = 0
+        self.y_ref = None           # ln(size) held this engagement
+        self.size_engage_z = None   # OptiTrack height at engagement (fence)
+        self.size_fence_tripped = False
 
         # APPROACH TEST (raw mode): simulates the perching approach. Once the
         # vehicle has been ALIGNED without a break for approach_dwell_s at
@@ -797,12 +847,28 @@ class IbvsController:
         # OptiTrack height PID: anything else (land/perch constants, the
         # 0.5 "hover" of the climb-rate convention) is far above hover
         # throttle and climbs away (README: ~5.4 m/s, flight-tested).
+        if self.height_source not in (HEIGHT_OPTITRACK, HEIGHT_SIZE):
+            raise rospy.ROSInitException(
+                "ibvs_controller: height_source must be 'optitrack' or 'size'")
+        size_height = self.raw_mode and self.height_source == HEIGHT_SIZE
         if self.raw_mode and not (self.mission_mode == MODE_HOVER and
-                                  self.use_optitrack):
+                                  (self.use_optitrack or size_height)):
             raise rospy.ROSInitException(
                 "ibvs_controller: thrust_mode 'raw' needs mission_mode 'hover' "
-                "AND use_optitrack (got mission_mode '%s', use_optitrack %s)"
-                % (self.mission_mode, self.use_optitrack))
+                "AND a height source: use_optitrack or height_source 'size' "
+                "(got mission_mode '%s', use_optitrack %s, height_source '%s')"
+                % (self.mission_mode, self.use_optitrack, self.height_source))
+        if size_height and self.approach_enabled:
+            raise rospy.ROSInitException(
+                "ibvs_controller: height_source 'size' is a HOLD only for now "
+                "-- set approach_enabled: false (the climb in size space is "
+                "not implemented yet)")
+        if size_height:
+            rospy.loginfo("ibvs_controller: HEIGHT FROM SIZE -- holds the distance "
+                          "to the branch from the detector's size%s",
+                          (" (OptiTrack = ground truth + %.2f m fence)" %
+                           self.size_fence_m) if self.use_optitrack and
+                          self.size_fence_m > 0.0 else " (no OptiTrack)")
         # Thrust that means "no vertical correction" in the active mode.
         self.neutral_thrust = (self.raw_hover_throttle if self.raw_mode
                                else self.hover_thrust)
@@ -997,6 +1063,11 @@ class IbvsController:
         # snap candidate was seen in this PUSH/PERCHED
         self.gripper_pub = rospy.Publisher(
             'ibvs/gripper', PointStamped, queue_size=1)
+        # ibvs/size_height (height_source 'size'): x = ln(size) held,
+        # y = ln(size) measured (filtered), z = x - y ~ (d - d_ref)/d.
+        # NaN while not engaged / no fresh size. Ground truth: ibvs/height y.
+        self.size_height_pub = rospy.Publisher(
+            'ibvs/size_height', PointStamped, queue_size=1)
         # x = target apparent size [px], y = time-to-contact [s] (NaN if the
         # target is not growing), z = distance estimate [m] (NaN unless
         # climbing steadily: approach_speed x time-to-contact)
@@ -1220,6 +1291,7 @@ class IbvsController:
         # apparent target size [px] for time-to-contact (0 = not sent)
         if msg.point.z > 0.0:
             self.size_hist.append((now, float(msg.point.z)))
+            self.update_size_height(now, msg, half_w, half_h)
 
         # pixel error: detection minus the aim point, in the IMAGE frame
         # (no signs, no normalization) -- positive x = right of centre,
@@ -1546,6 +1618,9 @@ class IbvsController:
             # same each engagement). Bounded by pid_z_raw/i_max.
             self.z_ref = None
             self.hold_height = None
+            self.y_ref = None
+            self.size_engage_z = None
+            self.size_fence_tripped = False
             self.approach_aligned_since = None
             self.climb_steady_since = None
             self.strike_ok_since = None
@@ -1558,6 +1633,11 @@ class IbvsController:
                 self.set_approach(APP_IDLE, "not engaged")
             return self.raw_hover_throttle
 
+        if self.height_source == HEIGHT_SIZE and not self.size_fence_tripped:
+            thrust = self.compute_size_height_thrust(rospy.Time.now())
+            if thrust is not None:
+                return thrust
+            # fence tripped: fall through to the OptiTrack hold below
         odom = self.last_odom
         age = (None if odom is None else
                (rospy.Time.now() - self.last_odom_time).to_sec())
@@ -1906,7 +1986,95 @@ class IbvsController:
 
     def hover_throttle_est(self):
         """Throttle that just holds the vehicle: configured + learned trim."""
-        return self.raw_hover_throttle + self.pid_z_raw.ki * self.pid_z_raw.integral
+        pid = self.height_pid()
+        return self.raw_hover_throttle + pid.ki * pid.integral
+
+    def height_pid(self):
+        """The raw-mode height PID in charge (its integral = the hover trim)."""
+        if self.height_source == HEIGHT_SIZE and not self.size_fence_tripped:
+            return self.pid_z_size
+        return self.pid_z_raw
+
+    def update_size_height(self, now, msg, half_w, half_h):
+        """Detection thread: ln(size) corrected for viewing the branch
+        off-centre (size_slant_axis), gated for jumps, lightly filtered. Only
+        stores; the control loop reads it."""
+        size = float(msg.point.z)
+        if self.size_fx > 0.0 and self.size_slant_axis != 'none':
+            off = (msg.point.x - half_w if self.size_slant_axis == 'u'
+                   else msg.point.y - half_h)
+            # x cos(theta across): 400 px off = 8.6 % (12 cm at 1.5 m)
+            size /= math.sqrt(1.0 + (off / self.size_fx) ** 2)
+        y = math.log(size)
+        stale = (self.y_last_accept is None or
+                 (now - self.y_last_accept).to_sec() > self.size_timeout_s)
+        if stale or self.y_filt is None:
+            self.y_filt = y
+        elif abs(y - self.y_filt) <= self.size_jump:
+            self.y_filt += self.size_filter_alpha * (y - self.y_filt)
+        else:
+            self.y_rejected += 1          # a jump: another piece of the branch
+            return
+        self.y_last_accept = now
+        self.y_hist.append((now, y))
+
+    def size_height_measurement(self, now):
+        """(filtered ln size, d ln size/dt) or (None, 0.0) if no fresh size."""
+        if (self.y_last_accept is None or
+                (now - self.y_last_accept).to_sec() > self.size_timeout_s):
+            return None, 0.0
+        pts = [((t - now).to_sec(), y) for t, y in list(self.y_hist)
+               if (now - t).to_sec() <= self.size_rate_window_s]
+        rate = 0.0
+        if len(pts) >= 4:
+            n = float(len(pts))
+            tm = sum(p[0] for p in pts) / n
+            ym = sum(p[1] for p in pts) / n
+            stt = sum((p[0] - tm) ** 2 for p in pts)
+            if stt > 1e-9:
+                rate = sum((p[0] - tm) * (p[1] - ym) for p in pts) / stt
+        return self.y_filt, rate
+
+    def compute_size_height_thrust(self, now):
+        """height_source 'size': hold the distance to the branch at engagement.
+
+        e = ln(size_ref) - ln(size) ~ (d - d_ref)/d: positive = further than
+        at engagement -> more thrust. D on the expansion rate (-vz/d). No
+        fresh size for size_timeout_s -> hover throttle + learned trim, open
+        loop (the pilot takes over). Returns None when the lab fence trips:
+        the caller then holds on OptiTrack instead.
+        """
+        pid = self.pid_z_size
+        pid.zero_terms()
+        z = self.fresh_odom_height(now) if self.use_optitrack else None
+        if self.size_engage_z is None and z is not None:
+            self.size_engage_z = z
+        if (z is not None and self.size_engage_z is not None and
+                self.size_fence_m > 0.0 and
+                abs(z - self.size_engage_z) > self.size_fence_m):
+            self.size_fence_tripped = True
+            self.z_ref = z
+            self.hold_height = self.size_engage_z
+            rospy.logerr("ibvs_controller: SIZE HOLD left the +-%.2f m fence "
+                         "(OptiTrack %.2f m, engaged at %.2f m) -- holding on "
+                         "OptiTrack, back to %.2f m, for this engagement",
+                         self.size_fence_m, z, self.size_engage_z,
+                         self.size_engage_z)
+            return None
+        y, rate = self.size_height_measurement(now)
+        if y is None:
+            rospy.logwarn_throttle(
+                1.0, "ibvs_controller: HEIGHT FROM SIZE: no fresh size -- "
+                     "holding hover throttle + trim (open loop), PILOT READY")
+            return self.raw_hover_throttle + pid.ki * pid.integral
+        if self.y_ref is None:
+            self.y_ref = y
+            rospy.loginfo("ibvs_controller: size height hold engaged: holding "
+                          "size %.1f px%s", math.exp(y),
+                          (" (OptiTrack %.2f m)" % z) if z is not None else "")
+        error = self.y_ref - y
+        delta = pid.update(error, -rate, self.dt)
+        return self.raw_hover_throttle + delta
 
     def push_force_ref(self):
         """PUSH force setpoint [N]: ramped from 0 to push_force_target over
@@ -2308,6 +2476,15 @@ class IbvsController:
         self.publish_debug(desired_roll, desired_pitch, thrust)
         if self.approach_enabled:
             self.monitor_gripper(desired_roll, desired_pitch)
+        if self.raw_mode and self.height_source == HEIGHT_SIZE:
+            y, _rate = self.size_height_measurement(rospy.Time.now())
+            m = PointStamped()
+            m.header.stamp = rospy.Time.now()
+            m.point.x = self.y_ref if self.y_ref is not None else float('nan')
+            m.point.y = y if y is not None else float('nan')
+            m.point.z = (self.y_ref - y if self.y_ref is not None and y is not None
+                         else float('nan'))
+            self.size_height_pub.publish(m)
         if self.mission_mode == MODE_LAND:
             self.maybe_land_disarm()
 
@@ -2441,7 +2618,7 @@ class IbvsController:
 
         pz = PointStamped()
         pz.header.stamp = now
-        pid_z = self.pid_z_raw if self.raw_mode else self.pid_z
+        pid_z = self.height_pid() if self.raw_mode else self.pid_z
         pz.point.x = pid_z.p_term
         pz.point.y = pid_z.i_term
         pz.point.z = pid_z.d_term

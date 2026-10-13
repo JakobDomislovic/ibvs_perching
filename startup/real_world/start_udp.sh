@@ -1,12 +1,32 @@
 #!/bin/bash
 # ============================================================================
-# IBVS real-world launcher -- EDIT THE CONFIG BLOCK BELOW, nothing else.
+# IBVS real-world launcher -- HEIGHT FROM THE BRANCH (detector size), no
+# OptiTrack/baro/GPS in the loop. EDIT THE CONFIG BLOCK BELOW, nothing else.
 #
-# Brings up the WHOLE stack + UDP receiver + IBVS controller in one tmux
-# session (session_udp.yml). Off-board detection over UDP; no on-board
-# ArUco / RealSense / uav_ros_stack / OptiTrack.
+# Same stack and config as startup/optitrack (custom_config is a copy of it),
+# except HEIGHT_SOURCE=size: the controller holds the distance to the branch
+# from the detector's apparent size. OptiTrack (USE_OPTITRACK=true, lab) is
+# only ground truth + a safety fence; set USE_OPTITRACK=false outdoors.
 #
-#   ./start_udp.sh
+#
+# Identical stack to startup/real_world/start_udp.sh (UDP receiver + IBVS
+# controller), plus OptiTrack (uav_ros_general's optitrack.launch). This
+# startup launches the controller with use_optitrack:=true, so it
+# subscribes DIRECTLY to vrpn_client/estimated_odometry (no relay node in
+# between) for its altitude (takeoff_height, hover_height,
+# land_disarm_height), instead of mavros/local_position/odom, which never
+# gets a real fix with no GPS / no mocap fed into the FCU (see
+# ~use_optitrack in ibvs_controller.py). That real altitude is what makes
+# mission_mode 'hover' usable here (bench-test IBVS X-Y with Z locked at
+# hover_height) -- it is NOT usable under startup/real_world. The same
+# vrpn_client topic can also just be watched directly (RViz / PlotJuggler /
+# rostopic echo), see the odometry window.
+# X-Y is unaffected either way -- that is still pure image-error IBVS.
+#
+# Needs uav_ros_general + ros_vrpn_client on the ROS_PACKAGE_PATH (the only
+# place in this repo that requires them -- startup/real_world needs neither).
+#
+#   ./start_optitrack.sh
 #
 # Everything you normally change lives in the CONFIG block right here.
 # (Control gains and the RC gate live in custom_config/ibvs_params_rw.yaml.)
@@ -15,12 +35,31 @@
 # ---- CONFIG (the only things you normally change) --------------------------
 FCU_URL=/dev/ttyUSB0:921600      # mavros serial link to the flight controller
                                  # (stable alt: /dev/serial/by-id/usb-FTDI_TTL-234X-5V_FT7YLB0N-if00-port0)
-MISSION_MODE=land                # land = down cam, descend+disarm | perch = up cam, climb
+MISSION_MODE=hover               # land = down cam, descend+disarm | perch = up cam, climb
                                  # THIS wins over mission_mode in ibvs_params_rw.yaml (the
                                  # launch sets it as an explicit <param> after the rosparam
                                  # load). Switching to perch also needs image_x_sign: -1.0
                                  # in that yaml -- image_y_sign is +1.0 in both modes.
 UAV_NAMESPACE=red                # ROS namespace for mavros + ibvs
+THRUST_MODE=raw                  # raw        = thrust is MOTOR THROTTLE, height PID on
+                                 #              OptiTrack only (sets FCU GUID_OPTIONS 8)
+                                 # climb_rate = thrust is a climb rate, ArduPilot holds
+                                 #              height on its own EKF (GUID_OPTIONS 0)
+                                 # raw needs MISSION_MODE=hover, and raw_hover_throttle
+                                 # in the yaml = the MEASURED hover throttle.
+HEIGHT_SOURCE=size               # size      = hold the distance to the branch from the
+                                 #             detector's size (no OptiTrack in the loop)
+                                 # optitrack = height PID on OptiTrack (as startup/optitrack)
+USE_OPTITRACK=true               # true  = LAB: run OptiTrack for ground truth + the
+                                 #         size_fence_m fence (yaml); never controls otherwise
+                                 # false = OUTDOORS: no OptiTrack at all
+COMPENSATE=true                  # true  = controller flies on the VIRTUAL LEVEL CAMERA point
+                                 #         (roll/pitch image motion removed from the IMU,
+                                 #         scripts/virtual_camera.py)
+                                 # false = controller flies on the raw detection
+                                 # The virtual point is computed and recorded either way
+                                 # (ibvs/target_point_virtual). Camera model: camera/* in
+                                 # custom_config/ibvs_params_rw.yaml.
 
 BIND_PORT=5005                   # UDP port the PiOS detector sends to
 # PiOS camera RESOLUTION -- DSJ-3079-HE (USB UVC) @ 1280x720.
@@ -31,6 +70,11 @@ BIND_PORT=5005                   # UDP port the PiOS detector sends to
 # DOWNSCALED size). Verify by centering the tag and reading the incoming px/py.
 IMAGE_WIDTH=1280                 # [px] frame width  the detector reports in
 IMAGE_HEIGHT=720                 # [px] frame height the detector reports in
+
+# OptiTrack -- the controller's altitude source in this startup (see the
+# header comment above).
+OPTITRACK_IP=192.168.0.50        # OptiTrack/Motive VRPN server IP
+OBJECT_NAME=$UAV_NAMESPACE       # rigid-body name registered in Motive
 # ---------------------------------------------------------------------------
 
 # work from this script's directory
@@ -46,7 +90,9 @@ ln session_udp.yml .tmuxinator.yml
 # session yml) -- so this file is the single source of truth
 tmuxinator ibvs_perching_udp \
   fcu_url="$FCU_URL" \
-  mission_mode="$MISSION_MODE" \
+  mission_mode="$MISSION_MODE" thrust_mode="$THRUST_MODE" compensate="$COMPENSATE" \
+  height_source="$HEIGHT_SOURCE" use_optitrack="$USE_OPTITRACK" \
   namespace="$UAV_NAMESPACE" \
   bind_port="$BIND_PORT" \
-  image_width="$IMAGE_WIDTH" image_height="$IMAGE_HEIGHT"
+  image_width="$IMAGE_WIDTH" image_height="$IMAGE_HEIGHT" \
+  optitrack_ip="$OPTITRACK_IP" object_name="$OBJECT_NAME"

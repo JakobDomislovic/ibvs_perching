@@ -51,6 +51,11 @@
        mission_mode:=hover and use_optitrack:=true). The FCU parameter MUST
        match; the startup sessions set both from one setting. -->
   <arg name="thrust_mode" default="climb_rate"/>
+  <!-- Height source in thrust_mode 'raw': 'optitrack' (height PID on
+       OptiTrack z, startup/optitrack) or 'size' (hold the distance to the
+       branch from the detector's apparent size, startup/real_world; then
+       use_optitrack only feeds the lab fence + ground truth). -->
+  <arg name="height_source" default="optitrack"/>
 
   <!-- Virtual level camera (scripts/virtual_camera.py): the detection with
        the image motion of roll/pitch removed, from the IMU in real time.
@@ -102,6 +107,7 @@
       <param name="image_height" value="$(arg image_height)"/>
       <param name="use_optitrack" value="$(arg use_optitrack)"/>
       <param name="thrust_mode" value="$(arg thrust_mode)"/>
+      <param name="height_source" value="$(arg height_source)"/>
     </node>
 
   </group>
