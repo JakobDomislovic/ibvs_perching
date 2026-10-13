@@ -63,7 +63,7 @@ mission_mode: hover
 #         level in y -- so image-left = drone-right. y is unchanged from LAND.
 #
 # Check any change with:  ./sim_tilt.py --sweep
-image_x_sign: 1.0             # LAND (down cam). PERCH (up cam) would be -1.0
+image_x_sign: -1.0             # LAND (down cam). PERCH (up cam) would be -1.0
 image_y_sign: 1.0             # LAND (down cam). Same value in PERCH
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,12 @@ thrust_min: 0.45              # clamp: gentlest allowed descent command
 thrust_max: 0.6               # clamp: strongest allowed climb command
 takeoff_height: 1.0           # [m] only used by the ibvs/takeoff CLIMB path
 
-hover_height: 1.5             # [m] mission_mode 'hover' ONLY: the fixed height
+hold_engage_height: true      # thrust_mode 'raw': hold the height where the pilot
+                              # selects GUIDED_NOGPS (align + climb start there)
+                              # instead of ramping to hover_height
+engage_min_height: 0.3        # [m] ...but never below this (engaged on/near the
+                              # ground -> lifts to 0.3 m first)
+hover_height: 1.0             # [m] mission_mode 'hover' ONLY: the fixed height
                               # target held via pid_z below. Set equal to
                               # takeoff_height for a clean test, otherwise
                               # CLIMB over/undershoots this and pid_z has an
@@ -158,7 +163,8 @@ command_mode: attitude
 # standing error is genuine steady state). That eats 1.44 deg = 72% of a 2 deg
 # budget, leaving only ~0.10 m/s2 to actually manoeuvre with. Fine for a slow
 # direction-check; raise to 3-5 deg if it cannot make headway.
-max_tilt: 0.035               # [rad] desired-tilt clamp (2.0 deg)
+max_tilt: 0.087               # [rad] desired-tilt clamp (5.0 deg; 2 deg until 2026-10-02, 3 deg until
+                              # 2026-10-13: a 1.9 deg trim (18:05) left only 1.1 deg to steer with)
 
 # RATE mode only (ignored when command_mode is 'attitude').
 kp_att: 1.5                   # [1/s] inner loop: body rate per rad of tilt error
@@ -220,18 +226,32 @@ pid_xy:
   # kp 0.14 with max_tilt 0.035 means the outer 3/4 of the frame just commands
   # a flat 2 deg and the last quarter is proportional. That is deliberate: full
   # (slow) authority while far out, gentle as it closes.
-  kp: 0.14                    # [rad per unit] 2 deg reached at 1/4-frame error
-  ki: 0.02                    # OFF for this test. Note pure P CANNOT remove the
+  # 2026-10-08: kp .28 / ki .05 / kd .35 / d_filter .45 (tuned in simulation) flew WAY too aggressive
+  # (2026-10-08-08-33-12.bag): fast tilting + the ~50 ms late attitude in virtual_camera (no frame
+  # "age" from the detector yet) made the compensated point jump ~40 px, which the strong, barely
+  # filtered D term amplified. Back to the gains that flew well. Raise kd only once "age" is sent.
+  # 2026-10-08 BRANCH at hover_height 1.0 m: all three gains / 3. The loop gain in PIXELS scales with
+  # 1/(camera-to-target distance); the branch at 1.5 m already moved 1.6x more px per metre than the
+  # floor tag and orbited (2.9 s period, 2026-10-08-08-57-04.bag), and 1.0 m is closer still (~2.5-3.5x).
+  # Same kp:kd:ki ratio = same damping, just slower. Floor-tag-at-1.5 m values were kp .20 ki .03 kd .18.
+  kp: 0.10                    # [rad per unit]
+  ki: 0.011                   # OFF for this test (old note). Note pure P CANNOT remove the
                               # standing error above -- it needs a permanent
                               # offset to generate the tilt that balances drift.
                               # Set ~0.02 once the direction is confirmed.
-  kd: 0.09                    # OFF for this test. This is the braking term: it
+  kd: 0.09                    # was 0.09 until 2026-10-02: doubled for more damping of the
+                              # slow (~5 s) aligned wobble -- safe now that the D term sees
+                              # the VIRTUAL (tilt-compensated) error. OFF for this test (old note). This is the braking term: it
                               # is what commands tilt AWAY before arrival, so
                               # with kd 0 expect overshoot on the way in.
-  i_max: 0.025                 # [rad] max integral contribution -- this is the
+  i_max: 0.045                 # [rad] (2.6 deg; was 0.025 = 1.43 deg, saturated on
+                              # 2026-10-12 18:05 at a ~1.9 deg pitch trim)
+                              # max integral contribution -- this is the
                               # trim authority: 0.05 rad of tilt cancels about
                               # g*0.05 = 0.49 m/s^2 of steady disturbance, and
                               # bounds how far the integrator can wind up
+  keep_trim: true             # keep the integral (= learned X-Y trim) across
+                              # engagements instead of re-learning it from 0
   d_filter: 0.15              # EMA on the differentiated detection (1.0 = off)
   d_max_dt: 0.40              # [s] longest detection gap still differentiated;
                               # beyond it the D term is zeroed instead of
@@ -293,7 +313,10 @@ pid_z:
 # Flight-tested 2026-09-29-13-38-32.bag: +-2 cm hold near 1 m; big
 # engagements were too fast, hence hover_ramp_speed + I frozen while ramping.
 # ---------------------------------------------------------------------------
-raw_hover_throttle: 0.133      # MEASURED hover (vfr_hud/throttle), see above
+raw_hover_throttle: 0.151     # WITH THE ADDED MASS: middle of the measured range 0.148 (fresh battery,
+                              # 2026-10-08-08-15-37) .. 0.159 (drained, 08-45-58). Was 0.148 (08:15 bag: thrust
+                              # 0.147-0.149 in the holds). Was 0.133 without it -- change back if
+                              # the mass comes off. Re-measure: scripts/hover_throttle_from_bag.py
 raw_thrust_margin: 0.04       # max |throttle - hover| the PID may command
                               # (~ +-0.3 g); also bounds how wrong the hover
                               # value may be: covers a real hover of 0.10-0.18
@@ -303,6 +326,103 @@ hover_ramp_speed: 0.3         # [m/s] the setpoint starts at the height you
                               # speed. 2026-09-29 engagements from 2.1-2.7 m
                               # without it: 0.7-1.3 m/s drops, 0.14-0.47 m
                               # undershoot, 8-10 s creep back.
+climb_integrate: true         # pid_z_raw integral also learns while CLIMBING /
+                              # STRIKE (else frozen while ramping): engaged in
+                              # ground effect it lagged 13-20 cm behind the climb
+                              # (2026-10-12-17-44-31)
+
+# APPROACH TEST (simulates the perching approach; thrust_mode 'raw' only).
+# Hover at hover_height; once ALIGNED for approach_dwell_s without a break,
+# the height setpoint climbs at approach_speed -- ONLY while ALIGNED: it holds
+# as soon as alignment or the target is lost and resumes when ALIGNED again --
+# until STRIKE or contact (below), never above max_height. The PILOT ends it
+# (leave GUIDED_NOGPS); the next engagement starts over. Status: rostopic echo
+# ibvs/approach (IDLE / WAITING / CLIMBING / PAUSED / STRIKE / PUSH / PERCHED /
+# FAILED).
+# NOTE for the floor branch: it was not detected below ~1.2 m
+# (2026-10-08-09-32-35.bag: 0 % at 0.8-1.2 m, 98 % at 1.4-1.6 m).
+approach_enabled: true
+approach_dwell_s: 2.0         # [s] continuously ALIGNED before the climb starts (5.0 until 2026-10-13)
+approach_speed: 0.15          # [m/s] climb rate while CLIMBING (aligned). Was 0.05
+                              # until 2026-10-11, 0.10 until 2026-10-12 (held
+                              # <= 3 cm lateral). 0.15: TTC exact, size to contact
+                              # (11:43). 0.20 tried 2026-10-12 16:11: detector
+                              # dropped 'size' from ~1.3 m up -> no STRIKE.
+max_height: 2.5               # [m] SAFETY limit for the whole approach: CLIMBING
+                              # and STRIKE never set the height above it (ArUco
+                              # at ~2.3 m; OptiTrack loses the vehicle >~2.5 m)
+
+# --- STRIKE / PUSH / PERCHED (end of the approach) ---------------------------
+#   CLIMBING --(close + aligned within strike_align_px)--> STRIKE: X-Y level,
+#   climb at strike_speed until CONTACT --> PUSH: force ramped to activate the
+#   gripper --> PERCHED once it held gripper_activation_force_n, else FAILED
+#   (back down to where STRIKE started). Contact is watched all the time in CLIMBING and
+#   STRIKE, from IMU + thrust only (topic ibvs/contact, x = force [N]).
+# "Close" (ibvs/closeness): strike_trigger
+#   ttc     image only, works OUTDOORS too: distance = climb speed x
+#           time-to-contact, the latter from how fast the target grows in the
+#           image. Needs the detector to send 'size' (px) -- until then it
+#           never strikes and climbs on until contact (or max_height).
+#   height  LAB ONLY fallback: OptiTrack height >= strike_height
+#   off     never strike (contact during the climb still -> PUSH)
+strike_trigger: ttc           # ttc | height | 'off' (quote it: bare off = false)
+strike_distance: 0.60         # [m] ttc: strike when the estimated camera-to-target
+                              # distance is below this. 2026-10-09-11-34-29.bag:
+                              # camera-to-ArUco ~ 2.51 m - height -> STRIKE at ~1.9 m
+strike_height: 1.9            # [m] height trigger only (below max_height)
+strike_align_px: 50           # [px] must be this well aligned to commit
+strike_confirm_s: 0.2         # [s] close + aligned for this long before STRIKE
+strike_speed: 0.25            # [m/s] blind final climb. Was 0.15 until 2026-10-11:
+                              # 3.5-4 s blind -> 28-65 cm drift. Raise step by step.
+strike_xy_correct: true       # keep correcting X-Y in STRIKE while the target is
+strike_det_timeout_s: 0.2     # still detected (younger than this); then hold trim
+strike_timeout_s: 6.0         # [s] no contact by then -> FAILED, back down
+                              # (0.6 m at 0.15 m/s = 4 s, plus margin)
+ttc_window_s: 1.0             # [s] size samples used for the expansion rate
+ttc_min_samples: 10
+vehicle_mass: 1.0             # [kg] for the contact force estimate
+contact_force_n: 0.6          # [N] sustained push: 0.2 s mean above this...
+contact_dwell_s: 0.2          # [s] ...for this long (free flight: <= 0.38 N)
+contact_baseline_s: 1.5       # [s] the contact-force zero is learned while hovering
+                              # (ALIGN/ALIGNED/TAG_LOST) with this time constant
+                              # (3.0 default; shorter now that the climb starts
+                              # 2 s after ALIGNED)
+impact_force_n: 1.2           # [N] impact: one raw IMU sample above this. Was 2.0
+                              # until 2026-10-11: the real hit (0.25 m/s on the
+                              # ArUco) peaked at exactly 2.0 N. Free flight raw:
+                              # <= 0.16 N (2026-10-11), <= 0.6 N (older bags)
+# GRIPPER ACTIVATION (PUSH): the contact force is ramped to activation_margin x
+# gripper_activation_force_n; PERCHED once the measured force (ibvs/contact x)
+# stayed >= gripper_activation_force_n for activation_hold_s. Throttle from
+# F = m g (u/u_hover - 1): 1.8 N at hover 0.151 -> ~0.179. The force is the
+# thrust model's (+0.03 throttle gave 1.8 of 2.0 N on 2026-10-12) -- check it
+# on a scale before trusting larger forces.
+gripper_activation_force_n: 1.5   # [N] force that must be held for PERCHED (push 1.8 N closes the gripper)
+activation_margin: 1.2        # push to 1.2 x 1.5 = 1.8 N (3.0, then 2.3 N on 2026-10-12: 2.3 N lifted the branch 4 cm)
+activation_hold_s: 0.5        # [s] at >= activation force before PERCHED
+push_ramp_s: 0.3              # [s] force ramp 0 -> target after contact (0.5 s on
+                              # 2026-10-12 16:11/17:44: sagged off the branch first)
+push_timeout_s: 3.0           # [s] activation not reached by then -> FAILED
+push_slip_m: 0.10             # [m] OptiTrack this far above the contact height... (was 0.05: a flexible branch lifted 4.1 cm under 2.3 N, 2026-10-12-11-43-43)
+push_slip_vz: 0.25            # [m/s] ...or rising this fast = slid off (lab only;
+                              # pressed on the branch vz stayed within +-0.05; the 4 cm lift peaked at 0.16)
+perch_on_contact: true        # contact detected = perched: push push_ramp_s +
+                              # activation_hold_s, then PERCHED; a bounce DOWN off
+                              # the branch no longer fails it (18:02/18:05 did),
+                              # only rising above the contact point does. false =
+                              # the force estimate must confirm the activation
+perched_thrust_margin: 0.01   # [throttle] light press while PERCHED (pilot takes over)
+# STRUCTURAL LIMIT: the controller never commands, and aborts on measuring,
+# more than this. Push target and predicted impact must each stay below half
+# of it (checked at startup). Cannot be set above 50 N (airframe).
+max_contact_force_n: 50.0     # [N]
+contact_stiffness_n_per_m: 2000.0  # [N/m] stiffest branch+gripper expected, for
+                              # the impact check: peak ~ strike_speed*sqrt(k*m)
+                              # = 11 N at 0.25 m/s (2026-10-12 hit: ~3.4 N)
+snap_gyro_dps: 150.0          # OBSERVE ONLY (ibvs/gripper + log): roll/pitch rate
+snap_ignore_s: 0.2            # above this, later than this after contact = possible
+                              # gripper snap (17:44: 364 deg/s at 0.88 s; impacts
+                              # 190-230 deg/s within the first 0.1 s)
 pid_z_raw:
   kp: 0.035                   # [throttle/m]  0.5 m low -> +0.018 throttle
   ki: 0.01                    # [throttle/(m*s)] trims a wrong hover throttle
@@ -315,6 +435,45 @@ pid_z_raw:
                               # -0.006, which caused the slow creep back.
 
 # ---------------------------------------------------------------------------
+# Virtual level camera (scripts/virtual_camera.py) -- removes the image motion
+# caused by roll/pitch, in real time from the IMU (exact rotation, see that
+# file). It needs only what describes the HARDWARE: how the camera is mounted
+# and its intrinsics at the detector's resolution. Nothing here is fitted
+# from flight data.
+#
+# start_optitrack.sh always runs it (SHADOW: ibvs/target_point_virtual next
+# to the raw point, both in the bag); the controller flies on it only with
+# COMPENSATE=true there.
+# ---------------------------------------------------------------------------
+camera:
+  mount: up                   # camera LOOKS UP (branch above). auto = from mission_mode (perch -> up, else
+                              # down) | down | up | custom (+ R_BC: 9 numbers,
+                              # row-major, body <- camera)
+  # INTRINSICS AT image_width x image_height (1280x720, the resolution the
+  # detector reports px/py in). Best: fx/fy/cx/cy from a checkerboard
+  # calibration AT THAT RESOLUTION -- when fx > 0 they override hfov_deg,
+  # and cx/cy default to the image centre.
+  #
+  # Until then, from the datasheet: DSJ-3079-HE (Sony IMX179), "76-degree
+  # field of view" (https://openelab.io/products/usb-camera-module-driver-free).
+  # ASSUMED to be the DIAGONAL of the 4:3 sensor, with 1280x720 using the
+  # full sensor width:  HFOV = 2*atan(4/5 * tan(76/2)) = 64.0 deg -> fx 1024 px.
+  # If the 16:9 mode crops the sensor instead, the true fx is larger and this
+  # UNDER-compensates (still in the right direction) -- the props-off tilt
+  # test shows it: e_virtual would still follow the tilt a little.
+  hfov_deg: 64.0              # datasheet fallback, unused while fx > 0
+  # MEASURED 2026-10-02 from 2026-10-02-12-08-33.bag: 2921 detections of the
+  # tag at the OptiTrack origin, fitted against the OptiTrack pose (residual
+  # median 13 px). fx = fy (square pixels); the free fit gave 968 / 904.
+  # The principal point is ~70 px BELOW the image centre (or, equivalently,
+  # the camera is pitched ~4 deg on its mount) -- with the old cx/cy = centre
+  # that alone put the hover ~10 cm off the tag at 1.5 m.
+  fx: 945.0
+  fy: 945.0
+  cx: 613.0
+  cy: 429.0
+
+# ---------------------------------------------------------------------------
 # State machine timing / thresholds
 # ---------------------------------------------------------------------------
 climb_settle_time: 10.0       # [s] CLIMB fallback (ibvs/takeoff path only)
@@ -325,4 +484,10 @@ align_tolerance_px: 70        # [px] target must be within this many pixels of
                               # Exits ALIGNED at 60 px via align_hysteresis.
 align_dwell_time: 1.5         # [s] error must stay aligned this long -> ALIGNED
 align_hysteresis: 1.5         # multiplies align_tolerance_px to leave ALIGNED
+align_ref_rate_px_s: 100.0    # [px/s] (70 until 2026-10-13) image setpoint ramp: on entering ALIGN the
+                              # setpoint starts at the target and slides to the
+                              # centre at this rate (never pulls back). 0 = step.
+                              # 2026-10-12-17-44-31: 395-454 px starts ran at
+                              # 0.4-0.5 m/s and were aborted; 70 px/s ~ 0.15 m/s
+                              # at 2 m from the branch.
 tag_timeout: 0.5              # [s] no target message within this -> TAG_LOST

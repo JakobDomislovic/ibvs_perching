@@ -160,8 +160,14 @@ centred) and forms the error itself as `detection - target`.
 One JSON object per datagram, on `BIND_PORT`:
 
 ```json
-{"px": 640, "py": 360}
+{"px": 640, "py": 360, "age": 0.05}
 ```
+
+`age` (optional) is how old the frame was when the packet was sent, in
+seconds, measured on the detector's own clock (send time − frame time). The
+receiver then stamps the point with the **frame time** (arrival − age), which
+`virtual_camera.py` needs to use the attitude the camera actually had. No clock
+sync is required. Without it the stamp is the arrival time.
 
 `error_x` / `error_y` are also accepted for detectors that already emit
 centre-relative values — they are forwarded unchanged, so set the controller's
@@ -182,6 +188,32 @@ toward where it appears in the image.**
 
 The same physical camera turned to face up inverts the **x** axis only. Check
 any change with `./sim_tilt.py --sweep` (§8) before flying.
+
+### Virtual level camera (roll/pitch compensation)
+
+The camera is rigidly mounted and the vehicle must tilt to translate, so every
+tilt moves the target in the image although the vehicle has not moved (≈20 px
+per degree here, in the direction that makes the loop tilt more).
+`virtual_camera.py` removes that in real time from the IMU, with an exact
+rotation and no fitted constants:
+
+```
+r_C = K⁻¹ [u, v, 1]ᵀ                       bearing in the physical camera
+r_V = R_BCᵀ · Rz(yaw)ᵀ R_WB(t_frame) · R_BC · r_C
+u_V = fx·r_V,x / r_V,z + W/2,   v_V = fy·r_V,y / r_V,z + H/2
+```
+
+It needs only the hardware description in `camera/*` of the config: the
+**mount** (`R_BC`, `auto` = down for land/hover, up for perch) and the
+camera **intrinsics at the detector's resolution** (calibration `fx/fy/cx/cy`,
+or the datasheet `hfov_deg`). A new airframe changes only the mount.
+
+It publishes `ibvs/target_point_virtual` next to the raw point. The optitrack
+startup always runs it (shadow mode, both in the bag); the controller flies on
+it only with `COMPENSATE=true` in `start_optitrack.sh` (launch arg
+`compensate:=true`). With no IMU attitude for a frame, nothing is published
+for that detection, so the controller reads TAG_LOST rather than an
+uncompensated point. Tests: `python3 scripts/test_virtual_camera.py`.
 
 ---
 
@@ -327,7 +359,21 @@ or a constant `land_descend_thrust` while centred for landing, clamped to
 | `~timeout` | `0.5` | [s] socket timeout (shutdown responsiveness) |
 | `~frame_id` | `camera` | `header.frame_id` of the published point |
 
-**Publishes:** `ibvs/target_point` (`geometry_msgs/PointStamped`)
+**Publishes:** `ibvs/target_point` (`geometry_msgs/PointStamped`, stamped
+with the frame time when the packet carries `age`)
+
+### `virtual_camera.py`
+
+**Subscribes:** `ibvs/target_point`, `mavros/imu/data`.
+**Publishes:** `ibvs/target_point_virtual` (same pixels, level camera),
+`ibvs/virtual_camera/tilt` (x = roll, y = pitch used [rad], z = frame age [s]).
+
+| Param | Default | Meaning |
+|---|---|---|
+| `~camera/mount` | `auto` | `down`, `up`, `auto` (from `mission_mode`) or `custom` (+ `~camera/R_BC`, 9 numbers) |
+| `~camera/fx`, `fy`, `cx`, `cy` | — | intrinsics from a calibration at `image_width`×`image_height`; override the FOV |
+| `~camera/hfov_deg`, `vfov_deg` | — | datasheet FOV, used when `fx` is 0 |
+| `~imu_max_gap_s` | `0.1` | never use an attitude further than this from an IMU sample |
 
 ### `ibvs_controller.py`
 

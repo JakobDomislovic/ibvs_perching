@@ -41,6 +41,13 @@ THRUST_MODE=raw                  # raw        = thrust is MOTOR THROTTLE, height
                                  #              height on its own EKF (GUID_OPTIONS 0)
                                  # raw needs MISSION_MODE=hover, and raw_hover_throttle
                                  # in the yaml = the MEASURED hover throttle.
+COMPENSATE=true                  # true  = controller flies on the VIRTUAL LEVEL CAMERA point
+                                 #         (roll/pitch image motion removed from the IMU,
+                                 #         scripts/virtual_camera.py)
+                                 # false = controller flies on the raw detection
+                                 # The virtual point is computed and recorded either way
+                                 # (ibvs/target_point_virtual). Camera model: camera/* in
+                                 # custom_config/ibvs_params_rw.yaml.
 
 BIND_PORT=5005                   # UDP port the PiOS detector sends to
 # PiOS camera RESOLUTION -- DSJ-3079-HE (USB UVC) @ 1280x720.
@@ -71,7 +78,7 @@ ln session_optitrack.yml .tmuxinator.yml
 # session yml) -- so this file is the single source of truth
 tmuxinator ibvs_perching_optitrack \
   fcu_url="$FCU_URL" \
-  mission_mode="$MISSION_MODE" thrust_mode="$THRUST_MODE" \
+  mission_mode="$MISSION_MODE" thrust_mode="$THRUST_MODE" compensate="$COMPENSATE" \
   namespace="$UAV_NAMESPACE" \
   bind_port="$BIND_PORT" \
   image_width="$IMAGE_WIDTH" image_height="$IMAGE_HEIGHT" \

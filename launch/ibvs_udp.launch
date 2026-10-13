@@ -52,6 +52,17 @@
        match; the startup sessions set both from one setting. -->
   <arg name="thrust_mode" default="climb_rate"/>
 
+  <!-- Virtual level camera (scripts/virtual_camera.py): the detection with
+       the image motion of roll/pitch removed, from the IMU in real time.
+       compensate:=true  the controller flies on ibvs/target_point_virtual
+                         instead of the raw ibvs/target_point (and the node
+                         is started for it).
+       virtual_camera:=true  run the node anyway, controller still on the
+                         raw point: SHADOW MODE, both points in the bag.
+       Needs camera/* (intrinsics + mount) in the config file. -->
+  <arg name="compensate" default="false"/>
+  <arg name="virtual_camera" default="$(arg compensate)"/>
+
   <group ns="$(arg namespace)">
 
     <!-- UDP receiver: PiOS detection -> ibvs/target_point (the raw pixel
@@ -68,8 +79,23 @@
          (last param wins) The controller normalizes the incoming pixel
          position against image_width/image_height; ~target_x / ~target_y are
          a frame-fraction offset, 0.0 = centred. -->
+    <!-- Virtual level camera: ibvs/target_point + mavros/imu/data ->
+         ibvs/target_point_virtual (same pixels, as a level camera would see
+         them). Reads camera/* from the same config file. -->
+    <node if="$(arg virtual_camera)" pkg="ibvs_perching" type="virtual_camera.py"
+          name="virtual_camera" output="screen">
+      <rosparam file="$(arg config)" command="load"/>
+      <param name="mission_mode" value="$(arg mission_mode)"/>
+      <param name="image_width"  value="$(arg image_width)"/>
+      <param name="image_height" value="$(arg image_height)"/>
+    </node>
+
     <node pkg="ibvs_perching" type="ibvs_controller.py"
           name="ibvs_controller" output="screen">
+      <!-- compensate: fly on the virtual point. Without the node running
+           this topic stays silent and the controller reads TAG_LOST. -->
+      <remap if="$(arg compensate)" from="ibvs/target_point"
+             to="ibvs/target_point_virtual"/>
       <rosparam file="$(arg config)" command="load"/>
       <param name="mission_mode" value="$(arg mission_mode)"/>
       <param name="image_width"  value="$(arg image_width)"/>
