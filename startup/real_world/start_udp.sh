@@ -50,7 +50,7 @@ THRUST_MODE=raw                  # raw        = thrust is MOTOR THROTTLE, height
 HEIGHT_SOURCE=size               # size      = hold the distance to the branch from the
                                  #             detector's size (no OptiTrack in the loop)
                                  # optitrack = height PID on OptiTrack (as startup/optitrack)
-USE_OPTITRACK=true               # true  = LAB: run OptiTrack for ground truth + the
+USE_OPTITRACK=false              # true  = LAB: run OptiTrack for ground truth + the
                                  #         size_fence_m fence (yaml); never controls otherwise
                                  # false = OUTDOORS: no OptiTrack at all
 COMPENSATE=true                  # true  = controller flies on the VIRTUAL LEVEL CAMERA point
